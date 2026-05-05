@@ -70,7 +70,6 @@ Pour le tester, monte un projet Vite minimal :
 ```bash
 npm create vite@latest planner-ui -- --template react
 cd planner-ui
-# remplace src/App.jsx par travel_planner.jsx
 npm install
 npm run dev
 ```
@@ -98,3 +97,6 @@ Le frontend lit `VITE_API_BASE` (par défaut `http://127.0.0.1:8000`).
 
 trouver des solutions pour les technique de  estimate_duration, de estimate_cost et de estimate_hours dans le fichier data_provider.py
 elles sont pour le moment codés en dur, trouver un moyen d'avoir des vraies infos ou de creer quelque chose de plus exhaustif et réel au vu des contraintes.
+
+rajouter des contraintes en plus dans solver.py pour que le voyage soit encore plus mieux
+mettre les contraintes plus obligatoires et reposer les questions si les contraintes ne sont pas indiquer par l'utilisateur.
