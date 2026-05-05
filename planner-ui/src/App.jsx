@@ -1,0 +1,574 @@
+import { useState, useRef, useEffect, useCallback } from "react";
+
+// ─── Backend API ───
+// Le solveur CP-SAT et le LLM tournent côté Python (voir api_server.py).
+// Ce frontend ne fait QUE de l'affichage et relaie les messages.
+
+const API_BASE = import.meta.env?.VITE_API_BASE || "http://127.0.0.1:8000";
+
+async function callChat(sessionId, message) {
+  const resp = await fetch(`${API_BASE}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, message }),
+  });
+  if (!resp.ok) throw new Error(`Backend error ${resp.status}`);
+  return resp.json();
+}
+
+async function callReset(sessionId) {
+  await fetch(`${API_BASE}/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+async function callState(sessionId) {
+  const resp = await fetch(`${API_BASE}/state?session_id=${encodeURIComponent(sessionId)}`);
+  if (!resp.ok) return null;
+  return resp.json();
+}
+
+// ─── Theming ───
+
+const CATEGORY_COLORS = {
+  culture: { bg: "#E8D5B7", text: "#5C4033", accent: "#A0785A" },
+  gastro: { bg: "#F2D4D4", text: "#8B2500", accent: "#CD5C5C" },
+  nature: { bg: "#D4E8D4", text: "#2E5C2E", accent: "#6B8E6B" },
+  shopping: { bg: "#D4D4E8", text: "#2E2E5C", accent: "#6B6B8E" },
+  nightlife: { bg: "#E8D4E8", text: "#5C2E5C", accent: "#8E6B8E" },
+};
+
+const CATEGORY_ICONS = {
+  culture: "🏛️",
+  gastro: "🍷",
+  nature: "🌿",
+  shopping: "🛍️",
+  nightlife: "🌙",
+};
+
+// ─── Components ───
+
+function ConstraintBadge({ label, value }) {
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 4,
+      padding: "3px 10px", borderRadius: 20,
+      background: "rgba(160,120,90,0.12)", color: "#5C4033",
+      fontSize: 12, fontFamily: "'Instrument Serif', Georgia, serif",
+      border: "1px solid rgba(160,120,90,0.2)",
+    }}>
+      {label}: <strong>{Array.isArray(value) ? value.join(", ") : String(value)}</strong>
+    </span>
+  );
+}
+
+function TimelineActivity({ activity, travelers }) {
+  const cat = CATEGORY_COLORS[activity.category] || CATEGORY_COLORS.culture;
+  const icon = CATEGORY_ICONS[activity.category] || "📍";
+  const cost = activity.cost ?? activity.cost_euros ?? 0;
+
+  return (
+    <div style={{ display: "flex", gap: 12, alignItems: "stretch", marginBottom: 2 }}>
+      <div style={{
+        display: "flex", flexDirection: "column", alignItems: "center",
+        width: 56, flexShrink: 0,
+      }}>
+        <span style={{
+          fontSize: 13, fontWeight: 600, color: "#5C4033",
+          fontFamily: "'DM Mono', monospace",
+        }}>{activity.start_time}</span>
+        <div style={{
+          width: 2, flex: 1, background: `linear-gradient(to bottom, ${cat.accent}, transparent)`,
+          marginTop: 4,
+        }} />
+        <span style={{
+          fontSize: 11, color: "#999",
+          fontFamily: "'DM Mono', monospace",
+        }}>{activity.end_time}</span>
+      </div>
+
+      <div style={{
+        flex: 1, padding: "10px 14px", borderRadius: 10,
+        background: cat.bg, border: `1px solid ${cat.accent}33`,
+        position: "relative", overflow: "hidden",
+      }}>
+        <div style={{
+          position: "absolute", top: 8, right: 10,
+          fontSize: 20, opacity: 0.3,
+        }}>{icon}</div>
+        <div style={{
+          fontSize: 14, fontWeight: 600, color: cat.text,
+          fontFamily: "'Instrument Serif', Georgia, serif",
+          marginBottom: 3,
+        }}>{activity.name}</div>
+        <div style={{
+          display: "flex", gap: 10, fontSize: 11, color: cat.text, opacity: 0.7,
+          fontFamily: "'DM Mono', monospace",
+        }}>
+          <span>{activity.duration_hours ?? activity.duration}h</span>
+          {activity.zone && <span>📍 {activity.zone}</span>}
+          {cost > 0 && <span>{cost * (travelers || 1)}€</span>}
+          {cost === 0 && <span style={{ color: "#2E5C2E" }}>Gratuit</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DayCard({ day, travelers }) {
+  if (!day) return null;
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        marginBottom: 12,
+      }}>
+        <h3 style={{
+          margin: 0, fontSize: 18,
+          fontFamily: "'Instrument Serif', Georgia, serif",
+          color: "#3C2415",
+        }}>Jour {day.day}</h3>
+        <span style={{
+          fontSize: 12, color: "#A0785A",
+          fontFamily: "'DM Mono', monospace",
+        }}>{day.activities.length} activités</span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {day.activities.length === 0 && (
+          <div style={{ padding: 16, textAlign: "center", color: "#999" }}>
+            Rien de prévu ce jour (le solveur a jugé qu'un jour de repos respectait mieux tes contraintes).
+          </div>
+        )}
+        {day.activities.map((act, i) => (
+          <TimelineActivity key={`${act.id}-${i}`} activity={act} travelers={travelers} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BudgetBar({ summary }) {
+  if (!summary || !summary.budget) return null;
+  const segments = [
+    { label: "Hôtel", value: summary.hotel_cost || 0, color: "#A0785A" },
+    { label: "Repas", value: summary.food_cost || 0, color: "#CD5C5C" },
+    { label: "Activités", value: summary.activity_cost || 0, color: "#6B8E6B" },
+  ];
+
+  return (
+    <div style={{ padding: "14px 0" }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", marginBottom: 8,
+        fontFamily: "'DM Mono', monospace", fontSize: 13,
+      }}>
+        <span style={{ color: "#5C4033" }}>{summary.total_cost}€ / {summary.budget}€</span>
+        <span style={{ color: summary.remaining_budget > 0 ? "#2E5C2E" : "#8B2500" }}>
+          {summary.remaining_budget > 0 ? `${summary.remaining_budget}€ restants` : "Budget dépassé !"}
+        </span>
+      </div>
+      <div style={{
+        height: 10, borderRadius: 10, background: "#F5F0EB",
+        overflow: "hidden", display: "flex",
+      }}>
+        {segments.map((seg, i) => (
+          <div key={i} style={{
+            width: `${(seg.value / summary.budget) * 100}%`,
+            background: seg.color, transition: "width 0.5s ease",
+          }} />
+        ))}
+      </div>
+      <div style={{
+        display: "flex", gap: 14, marginTop: 6,
+        fontSize: 11, fontFamily: "'DM Mono', monospace",
+      }}>
+        {segments.map((seg, i) => (
+          <span key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: seg.color, display: "inline-block",
+            }} />
+            {seg.label}: {seg.value}€
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StatsPanel({ stats, city, dataSource }) {
+  if (!stats && !city) return null;
+  return (
+    <div style={{
+      display: "flex", gap: 16, padding: "10px 0", flexWrap: "wrap",
+      fontSize: 11, fontFamily: "'DM Mono', monospace", color: "#999",
+      borderTop: "1px solid #eee",
+    }}>
+      {city?.name && <span>🏙️ {city.name}{city.country ? ` (${city.country})` : ""}</span>}
+      {stats?.solve_time_ms != null && <span>⚡ CP-SAT {stats.solve_time_ms}ms</span>}
+      {stats?.branches != null && <span>🌳 {stats.branches} branches</span>}
+      {stats?.conflicts != null && <span>💥 {stats.conflicts} conflits</span>}
+      {stats?.status_name && <span>📊 {stats.status_name}</span>}
+      {dataSource && <span>📡 {dataSource}</span>}
+    </div>
+  );
+}
+
+function ChatMessage({ message }) {
+  const isUser = message.role === "user";
+  return (
+    <div style={{
+      display: "flex", justifyContent: isUser ? "flex-end" : "flex-start",
+      marginBottom: 10,
+    }}>
+      <div style={{
+        maxWidth: "85%", padding: "10px 14px", borderRadius: 16,
+        background: isUser ? "#3C2415" : "#F5F0EB",
+        color: isUser ? "#F5F0EB" : "#3C2415",
+        fontSize: 14, lineHeight: 1.5,
+        fontFamily: "'Instrument Serif', Georgia, serif",
+        borderBottomRightRadius: isUser ? 4 : 16,
+        borderBottomLeftRadius: isUser ? 16 : 4,
+      }}>
+        {message.content}
+        {message.extracted && Object.keys(message.extracted).length > 0 && (
+          <div style={{
+            marginTop: 8, paddingTop: 8,
+            borderTop: `1px solid ${isUser ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.08)"}`,
+            display: "flex", flexWrap: "wrap", gap: 4,
+          }}>
+            {Object.entries(message.extracted).map(([k, v]) => (
+              <span key={k} style={{
+                fontSize: 11, padding: "2px 8px", borderRadius: 10,
+                background: isUser ? "rgba(255,255,255,0.15)" : "rgba(160,120,90,0.12)",
+                fontFamily: "'DM Mono', monospace",
+              }}>
+                {k}: {Array.isArray(v) ? v.join(",") : String(v)}
+              </span>
+            ))}
+          </div>
+        )}
+        {message.errors && message.errors.length > 0 && (
+          <div style={{
+            marginTop: 6, fontSize: 11, color: "#8B2500",
+            fontFamily: "'DM Mono', monospace",
+          }}>
+            ⚠ {message.errors.join(" · ")}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ───
+
+export default function TravelPlannerApp() {
+  const [sessionId] = useState(() => `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const [messages, setMessages] = useState([{
+    role: "assistant",
+    content: "Ciao ! 🇮🇹 Dis-moi ce que tu veux planifier : ville, jours, budget, centres d'intérêt… et mon solveur CP-SAT t'optimise tout ça.",
+  }]);
+  const [input, setInput] = useState("");
+  const [constraints, setConstraints] = useState(null);
+  const [plan, setPlan] = useState(null);
+  const [city, setCity] = useState(null);
+  const [dataSource, setDataSource] = useState("");
+  const [activeDay, setActiveDay] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [showConstraints, setShowConstraints] = useState(false);
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // Charge l'état initial du serveur (contraintes par défaut)
+  useEffect(() => {
+    callState(sessionId).then(s => {
+      if (s?.constraints) setConstraints(s.constraints);
+    }).catch(() => { });
+  }, [sessionId]);
+
+  const handleSend = useCallback(async () => {
+    if (!input.trim() || loading) return;
+    const userMsg = input.trim();
+    setInput("");
+    setMessages(prev => [...prev, { role: "user", content: userMsg }]);
+    setLoading(true);
+
+    try {
+      const result = await callChat(sessionId, userMsg);
+
+      setConstraints(result.constraints);
+      if (result.plan) setPlan(result.plan);
+      if (result.city) setCity(result.city);
+      if (result.plan?.data_source) setDataSource(result.plan.data_source);
+      setActiveDay(0);
+
+      setMessages(prev => [
+        ...prev.slice(0, -1),
+        { role: "user", content: userMsg, extracted: result.extracted },
+        { role: "assistant", content: result.reply, errors: result.errors },
+      ]);
+    } catch (e) {
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        content: `Erreur côté backend : ${e.message}. Le serveur FastAPI tourne-t-il sur ${API_BASE} ?`,
+      }]);
+    }
+    setLoading(false);
+  }, [input, sessionId, loading]);
+
+  const handleReset = useCallback(async () => {
+    await callReset(sessionId);
+    const s = await callState(sessionId);
+    setConstraints(s?.constraints || null);
+    setPlan(null);
+    setCity(null);
+    setMessages([{
+      role: "assistant",
+      content: "Nouvelle session. Dis-moi ce que tu veux planifier !",
+    }]);
+  }, [sessionId]);
+
+  const suggestions = [
+    "5 jours à Rome, budget 1500€, on adore la culture",
+    "Je déteste le shopping, plus de gastronomie !",
+    "On est 2, rythme tranquille svp",
+    "Je veux absolument voir le Colisée et le Vatican",
+    "Jour 3 plus relax, max 2 activités",
+    "Budget serré : 1000€ pour 3 jours",
+  ];
+
+  const activeDayData = plan?.days?.[activeDay];
+
+  return (
+    <div style={{
+      display: "flex", height: "100vh", width: "100%",
+      fontFamily: "'Instrument Serif', Georgia, serif",
+      background: "#FDFBF7",
+      overflow: "hidden",
+    }}>
+      {/* ─── Left: Chat Panel ─── */}
+      <div style={{
+        width: "40%", minWidth: 340,
+        display: "flex", flexDirection: "column",
+        borderRight: "1px solid #E8E0D8",
+        background: "#FFFFFF",
+      }}>
+        <div style={{
+          padding: "16px 20px",
+          borderBottom: "1px solid #E8E0D8",
+          background: "#3C2415",
+          color: "#F5F0EB",
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+        }}>
+          <div>
+            <h1 style={{
+              margin: 0, fontSize: 20,
+              fontFamily: "'Instrument Serif', Georgia, serif",
+              fontWeight: 400,
+            }}>
+              🏛️ Planificateur CP-SAT
+            </h1>
+            <p style={{
+              margin: "4px 0 0", fontSize: 12, opacity: 0.7,
+              fontFamily: "'DM Mono', monospace",
+            }}>LLM (qwen3) + CP-SAT + OpenTripMap/OSRM</p>
+          </div>
+          <button
+            onClick={handleReset}
+            style={{
+              background: "transparent", border: "1px solid rgba(245,240,235,0.3)",
+              color: "#F5F0EB", padding: "4px 10px", borderRadius: 8,
+              fontSize: 11, cursor: "pointer",
+              fontFamily: "'DM Mono', monospace",
+            }}
+          >reset</button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px" }}>
+          {messages.map((msg, i) => <ChatMessage key={i} message={msg} />)}
+          {loading && (
+            <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10 }}>
+              <div style={{
+                padding: "10px 18px", borderRadius: 16, borderBottomLeftRadius: 4,
+                background: "#F5F0EB", fontSize: 14,
+              }}>
+                <span style={{ animation: "pulse 1.5s infinite" }}>
+                  Extraction LLM → fetch POI → résolution CP-SAT…
+                </span>
+              </div>
+            </div>
+          )}
+          <div ref={chatEndRef} />
+        </div>
+
+        {messages.length < 3 && (
+          <div style={{
+            padding: "0 16px 8px",
+            display: "flex", flexWrap: "wrap", gap: 6,
+          }}>
+            {suggestions.slice(0, 4).map((s, i) => (
+              <button key={i} onClick={() => setInput(s)}
+                style={{
+                  padding: "6px 12px", borderRadius: 20,
+                  background: "#F5F0EB", border: "1px solid #E8E0D8",
+                  fontSize: 12, color: "#5C4033", cursor: "pointer",
+                  fontFamily: "'Instrument Serif', Georgia, serif",
+                }}
+              >{s}</button>
+            ))}
+          </div>
+        )}
+
+        <div style={{
+          padding: "12px 16px",
+          borderTop: "1px solid #E8E0D8",
+          display: "flex", gap: 8,
+        }}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleSend()}
+            placeholder="Décris ton voyage idéal…"
+            disabled={loading}
+            style={{
+              flex: 1, padding: "10px 14px", borderRadius: 12,
+              border: "1px solid #E8E0D8", background: "#FDFBF7",
+              fontSize: 14, fontFamily: "'Instrument Serif', Georgia, serif",
+              outline: "none", color: "#3C2415",
+            }}
+          />
+          <button
+            onClick={handleSend}
+            disabled={loading || !input.trim()}
+            style={{
+              padding: "10px 18px", borderRadius: 12,
+              background: loading ? "#ccc" : "#3C2415",
+              color: "#F5F0EB", border: "none",
+              fontSize: 14, cursor: loading ? "default" : "pointer",
+              fontFamily: "'DM Mono', monospace",
+            }}
+          >→</button>
+        </div>
+      </div>
+
+      {/* ─── Right: Plan Panel ─── */}
+      <div style={{
+        flex: 1, display: "flex", flexDirection: "column",
+        overflowY: "auto", background: "#FDFBF7",
+      }}>
+        <div style={{
+          padding: "12px 20px",
+          borderBottom: "1px solid #E8E0D8",
+          background: "#FFFFFF",
+        }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            marginBottom: showConstraints ? 10 : 0,
+          }}>
+            <span style={{
+              fontSize: 13, color: "#A0785A",
+              fontFamily: "'DM Mono', monospace",
+            }}>
+              Contraintes actives ({constraints ? Object.entries(constraints).filter(([, v]) =>
+                v !== undefined && v !== null && (Array.isArray(v) ? v.length > 0 : true)
+              ).length : 0})
+            </span>
+            <button
+              onClick={() => setShowConstraints(!showConstraints)}
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                fontSize: 12, color: "#A0785A",
+                fontFamily: "'DM Mono', monospace",
+              }}
+            >
+              {showConstraints ? "▲ Masquer" : "▼ Voir"}
+            </button>
+          </div>
+          {showConstraints && constraints && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {Object.entries(constraints).map(([k, v]) => {
+                if (v === null || v === undefined) return null;
+                if (Array.isArray(v) && v.length === 0) return null;
+                return <ConstraintBadge key={k} label={k} value={v} />;
+              })}
+            </div>
+          )}
+        </div>
+
+        {plan?.status === "INFEASIBLE" && (
+          <div style={{
+            margin: "16px 20px", padding: 16, borderRadius: 10,
+            background: "#FFF2E0", color: "#8B2500",
+            fontFamily: "'Instrument Serif', Georgia, serif",
+          }}>
+            <strong>Plan infaisable.</strong> {plan.message}
+          </div>
+        )}
+
+        {plan?.summary && (
+          <div style={{ padding: "0 20px" }}>
+            <BudgetBar summary={plan.summary} />
+          </div>
+        )}
+
+        {plan?.days && plan.days.length > 0 && (
+          <div style={{
+            display: "flex", gap: 4, padding: "0 20px 8px",
+            borderBottom: "1px solid #E8E0D8", flexWrap: "wrap",
+          }}>
+            {plan.days.map((d, i) => (
+              <button key={i}
+                onClick={() => setActiveDay(i)}
+                style={{
+                  padding: "6px 16px", borderRadius: 8,
+                  background: activeDay === i ? "#3C2415" : "transparent",
+                  color: activeDay === i ? "#F5F0EB" : "#5C4033",
+                  border: activeDay === i ? "none" : "1px solid #E8E0D8",
+                  fontSize: 13, cursor: "pointer",
+                  fontFamily: "'DM Mono', monospace",
+                }}
+              >
+                J{d.day} <span style={{ opacity: 0.6 }}>({d.activities.length})</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {activeDayData && (
+          <div style={{ padding: "0 20px", flex: 1 }}>
+            <DayCard day={activeDayData} travelers={constraints?.num_travelers || 1} />
+          </div>
+        )}
+
+        {!plan && (
+          <div style={{
+            padding: 32, textAlign: "center", color: "#A0785A",
+            fontFamily: "'Instrument Serif', Georgia, serif",
+          }}>
+            Commence par décrire ton voyage dans le chat à gauche.
+          </div>
+        )}
+
+        <div style={{ padding: "0 20px 12px" }}>
+          <StatsPanel stats={plan?.stats} city={city} dataSource={dataSource} />
+        </div>
+      </div>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap');
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #D4C8BB; border-radius: 3px; }
+      `}</style>
+    </div>
+  );
+}
