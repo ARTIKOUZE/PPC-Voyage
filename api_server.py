@@ -47,6 +47,7 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="default")
     message: str
     solve_timeout: int = Field(default=10, ge=1, le=60)
+    mode: str = Field(default="flexible", pattern="^(flexible|strict)$")
 
 
 class ResetRequest(BaseModel):
@@ -75,6 +76,7 @@ def chat(req: ChatRequest):
         session_id=req.session_id,
         user_message=req.message,
         solve_timeout=req.solve_timeout,
+        mode=req.mode,
     )
     return result
 

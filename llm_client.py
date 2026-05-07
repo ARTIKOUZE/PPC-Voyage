@@ -79,9 +79,13 @@ class ExtractedConstraints(BaseModel):
 
     must_visit: Optional[list[str]] = None
     must_avoid: Optional[list[str]] = None
+    must_visit_on_day: Optional[dict[str, int]] = None   # {"louvre": 3}  (jours 1-indexés)
 
     max_activities_per_day: Optional[int] = Field(None, ge=1, le=8)
     min_activities_per_day: Optional[int] = Field(None, ge=0, le=8)
+
+    day_start_hour: Optional[int] = Field(None, ge=0, le=23)
+    day_end_hour: Optional[int] = Field(None, ge=1, le=24)
 
     def clean(self) -> dict:
         """Retourne un dict ne contenant que les champs renseignés et validés."""
@@ -95,6 +99,15 @@ class ExtractedConstraints(BaseModel):
                 continue
             if k == "morning_preference" and v not in VALID_CATEGORIES:
                 continue
+            if k == "must_visit_on_day":
+                # Valider : clés = strings, valeurs = entiers ≥ 1
+                v = {
+                    str(act): int(day)
+                    for act, day in v.items()
+                    if isinstance(day, (int, float)) and int(day) >= 1
+                }
+                if not v:
+                    continue
             out[k] = v
         return out
 
@@ -118,16 +131,21 @@ AUTHORIZED FIELDS:
 - avoided_categories (array, same values)
 - preferred_pace: "relaxed" (2 activities/day), "moderate" (3), "intense" (4)
 - morning_preference (a category to favor in the morning)
-- must_visit (array of known activity IDs — leave empty if you do not know the exact IDs)
-- must_avoid (array of IDs)
+- must_visit (array of activity names/IDs: use when user wants an activity, without specifying a day)
+- must_visit_on_day (object mapping activity name to day number 1-indexed: use ONLY when user specifies a particular day)
+- must_avoid (array of activity names/IDs)
 - max_activities_per_day (int)
 - min_activities_per_day (int)
+- day_start_hour (int, 0-23): hour when the user wants to start activities each day (e.g. 9 for 9h)
+- day_end_hour (int, 1-24): hour when the user wants to stop activities each day (e.g. 18 for 18h, 24 for midnight)
 
 STRICT RULES:
 1. Respond ONLY with valid JSON (no markdown, no ```, no comments).
 2. Return only the fields that the message explicitly mentions or modifies. If the message contains no usable constraint, return {}.
 3. Do NOT guess default values. A missing field = not modified.
 4. Avoided categories go into avoided_categories, not into must_avoid.
+5. For must_visit_on_day: ALWAYS also add the activity to must_visit.
+6. Use the activity's common name in English or French as the key (e.g. "louvre", "eiffel tower", "colosseum").
 
 EXAMPLES:
 
@@ -140,11 +158,26 @@ User: "We are 2, relaxed pace and no shopping"
 User: "Budget €1500, max 3 activities per day, I like gastronomy"
 → {"total_budget":1500,"max_activities_per_day":3,"preferred_categories":["gastro"]}
 
+User: "Je veux commencer à 10h et finir à 18h"
+→ {"day_start_hour":10,"day_end_hour":18}
+
+User: "On commence tôt vers 8h du matin et on arrête à 22h le soir"
+→ {"day_start_hour":8,"day_end_hour":22}
+
 User: "Hello!"
 → {}
 
 User: "I absolutely want to see the Colosseum"
 → {"must_visit":["colosseum"]}
+
+User: "Je veux faire le Louvre le jour 3"
+→ {"must_visit":["louvre"],"must_visit_on_day":{"louvre":3}}
+
+User: "Can you add the Eiffel Tower on day 1?"
+→ {"must_visit":["eiffel tower"],"must_visit_on_day":{"eiffel tower":1}}
+
+User: "Inclure Notre-Dame le jour 2 et le Louvre le jour 4"
+→ {"must_visit":["notre-dame","louvre"],"must_visit_on_day":{"notre-dame":2,"louvre":4}}
 """
 
 
