@@ -18,8 +18,10 @@ import threading
 from typing import Optional
 
 from llm_client import extract_constraints, narrate_plan
-from data_provider import get_city_data, get_rome_data
-from solver import solve_with_city_data
+from llm_city_provider import generate_city_data
+from solver import solve_with_city_data, explain_solution
+from dialog_manager import next_question, format_missing_summary
+from constraint_extractor import detect_vague_fields
 
 
 # ─────────────────────────────────────────────
@@ -27,9 +29,13 @@ from solver import solve_with_city_data
 # ─────────────────────────────────────────────
 
 DEFAULT_CONSTRAINTS = {
-    "destination": "Rome",
-    "num_days": 5,
-    "total_budget": 2000,
+    # Contraintes critiques : None au démarrage → dialog_manager demandera
+    "destination": None,
+    "num_days": None,
+    "total_budget": None,
+    "day_start_hour": None,   # heure de début souhaitée → dialog_manager demandera
+    "day_end_hour": None,     # heure de fin souhaitée   → dialog_manager demandera
+    # Valeurs par défaut raisonnables pour les champs optionnels
     "num_travelers": 1,
     "hotel_per_night": 100,
     "daily_food_budget": 60,
@@ -38,7 +44,8 @@ DEFAULT_CONSTRAINTS = {
     "preferred_pace": "moderate",
     "must_visit": [],
     "must_avoid": [],
-    "max_activities_per_day": 4,
+    "must_visit_on_day": {},
+    "max_activities_per_day": 6,
     "min_activities_per_day": 1,
 }
 
@@ -77,6 +84,11 @@ ARRAY_FIELDS = {
     "must_visit", "must_avoid",
 }
 
+# Champs dictionnaire : les clés sont unionnées (la nouvelle valeur écrase l'ancienne)
+DICT_FIELDS = {
+    "must_visit_on_day",
+}
+
 INCOMPATIBLE_PAIRS = [
     ("preferred_categories", "avoided_categories"),
     ("must_visit", "must_avoid"),
@@ -99,6 +111,9 @@ def merge_constraints(current: dict, update: dict) -> dict:
         if key in ARRAY_FIELDS and isinstance(value, list):
             existing = merged.get(key, []) or []
             merged[key] = list(dict.fromkeys([*existing, *value]))
+        elif key in DICT_FIELDS and isinstance(value, dict):
+            existing = merged.get(key, {}) or {}
+            merged[key] = {**existing, **value}  # nouvelles valeurs écrasent les anciennes
         else:
             merged[key] = value
 
@@ -128,11 +143,8 @@ def load_city_data(city_name: str) -> Optional[dict]:
         if key in _city_cache:
             return _city_cache[key]
 
-    # Rome : données pré-cachées toujours disponibles, évite un round-trip API
-    if key in ("rome", "roma"):
-        data = get_rome_data()
-    else:
-        data = get_city_data(city_name)
+    # LLM génère les activités pour n'importe quelle ville (avec cache 30j)
+    data = generate_city_data(city_name)
 
     if data:
         with _city_cache_lock:
@@ -148,6 +160,7 @@ def handle_turn(
     session_id: str,
     user_message: str,
     solve_timeout: int = 10,
+    mode: str = "flexible",
 ) -> dict:
     """
     Traite un tour de conversation.
@@ -157,9 +170,11 @@ def handle_turn(
           "reply": str,                  # texte à afficher dans le chat
           "extracted": dict,             # contraintes extraites de CE message
           "constraints": dict,           # état consolidé après merge
-          "plan": dict | None,           # plan CP-SAT ou None si INFEASIBLE/ville inconnue
+          "plan": dict | None,           # plan CP-SAT ou None si incomplet/INFEASIBLE
           "city": dict,                  # infos ville (name, country, lat, lon)
-          "errors": list[str],           # erreurs non bloquantes (extraction, etc.)
+          "errors": list[str],           # erreurs non bloquantes
+          "needs_info": str | None,      # question à poser si contraintes critiques manquantes
+          "explanation": str | None,     # explication des compromis (si plan produit)
         }
     """
     errors: list[str] = []
@@ -174,13 +189,35 @@ def handle_turn(
     merged = merge_constraints(current, extracted)
     _store.set(session_id, merged)
 
-    # 3. Données ville (destination peut avoir changé)
+    # 3. Vérifier les contraintes critiques manquantes (dialog_manager)
+    vague_fields = detect_vague_fields(user_message)
+    pending_question = next_question(merged, vague_fields)
+
+    if pending_question:
+        # Contraintes critiques incomplètes : ne pas lancer le solveur
+        missing_info = format_missing_summary(merged)
+        errors.append(f"incomplete_constraints: {missing_info}")
+        return {
+            "reply": pending_question,
+            "extracted": extracted,
+            "constraints": merged,
+            "plan": None,
+            "city": {"name": merged.get("destination", "")},
+            "errors": errors,
+            "needs_info": pending_question,
+            "explanation": None,
+        }
+
+    # 4. Données ville (toutes les contraintes critiques sont présentes)
     destination = merged.get("destination", "Rome")
     city_data = load_city_data(destination)
 
     if not city_data:
         errors.append(f"city_not_found: {destination}")
-        reply = f"Je n'ai pas trouvé de données pour '{destination}'. Essaye une autre ville ou reste sur Rome."
+        reply = (
+            f"Je n'ai pas trouvé de données pour '{destination}'. "
+            "Essaye une autre ville ou reste sur Rome."
+        )
         return {
             "reply": reply,
             "extracted": extracted,
@@ -188,12 +225,19 @@ def handle_turn(
             "plan": None,
             "city": {"name": destination},
             "errors": errors,
+            "needs_info": None,
+            "explanation": None,
         }
 
-    # 4. CP-SAT
-    plan = solve_with_city_data(merged, city_data, time_limit_seconds=solve_timeout)
+    # 5. CP-SAT
+    plan = solve_with_city_data(
+        merged, city_data, time_limit_seconds=solve_timeout, mode=mode
+    )
 
-    # 5. Narration
+    # 6. Explication des compromis
+    explanation = explain_solution(plan, merged)
+
+    # 7. Narration LLM
     reply = narrate_plan(user_message, plan, merged, extracted)
 
     return {
@@ -203,6 +247,8 @@ def handle_turn(
         "plan": plan,
         "city": city_data.get("city", {}),
         "errors": errors,
+        "needs_info": None,
+        "explanation": explanation,
     }
 
 
