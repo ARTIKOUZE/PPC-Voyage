@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from orchestrator import handle_turn, reset_session, get_session_state
+from orchestrator import handle_turn, handle_form, reset_session, get_session_state
 from llm_client import LLM_BASE_URL, LLM_MODEL
 
 try:
@@ -48,10 +48,20 @@ class ChatRequest(BaseModel):
     message: str
     solve_timeout: int = Field(default=10, ge=1, le=60)
     mode: str = Field(default="flexible", pattern="^(flexible|strict)$")
+    transport_mode: str | None = Field(default=None, pattern="^(foot|bike|car)$")
 
 
 class ResetRequest(BaseModel):
     session_id: str = Field(default="default")
+
+
+class PlanRequest(BaseModel):
+    """Contraintes structurées venant d'un formulaire UI (bypass extraction LLM)."""
+    session_id: str = Field(default="default")
+    constraints: dict
+    solve_timeout: int = Field(default=10, ge=1, le=60)
+    mode: str = Field(default="flexible", pattern="^(flexible|strict)$")
+    transport_mode: str | None = Field(default=None, pattern="^(foot|bike|car)$")
 
 
 # ─────────────────────────────────────────────
@@ -77,8 +87,24 @@ def chat(req: ChatRequest):
         user_message=req.message,
         solve_timeout=req.solve_timeout,
         mode=req.mode,
+        transport_mode=req.transport_mode,
     )
     return result
+
+
+@app.post("/plan")
+def plan(req: PlanRequest):
+    """Pipeline alternatif sans extraction LLM : contraintes structurées directes.
+    Sert à comparer NL vs formulaire (objectif 5 du sujet du projet)."""
+    if not isinstance(req.constraints, dict) or not req.constraints:
+        raise HTTPException(status_code=400, detail="constraints vide ou invalide")
+    return handle_form(
+        session_id=req.session_id,
+        form_constraints=req.constraints,
+        solve_timeout=req.solve_timeout,
+        mode=req.mode,
+        transport_mode=req.transport_mode,
+    )
 
 
 @app.get("/state")

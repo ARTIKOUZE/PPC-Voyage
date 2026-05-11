@@ -20,7 +20,7 @@ from typing import Optional
 from llm_client import extract_constraints, narrate_plan
 from llm_city_provider import generate_city_data
 from solver import solve_with_city_data, explain_solution
-from dialog_manager import next_question, format_missing_summary
+from dialog_manager import next_question, format_missing_summary, get_missing_critical, CRITICAL_FIELDS
 from constraint_extractor import detect_vague_fields
 
 
@@ -33,8 +33,10 @@ DEFAULT_CONSTRAINTS = {
     "destination": None,
     "num_days": None,
     "total_budget": None,
-    "day_start_hour": None,   # heure de début souhaitée → dialog_manager demandera
-    "day_end_hour": None,     # heure de fin souhaitée   → dialog_manager demandera
+    # Plage horaire par défaut : 9h-19h (l'utilisateur peut surcharger via NL :
+    # "je commence à 8h", "on veut finir à 22h"…)
+    "day_start_hour": 9,
+    "day_end_hour": 19,
     # Valeurs par défaut raisonnables pour les champs optionnels
     "num_travelers": 1,
     "hotel_per_night": 100,
@@ -47,14 +49,17 @@ DEFAULT_CONSTRAINTS = {
     "must_visit_on_day": {},
     "max_activities_per_day": 6,
     "min_activities_per_day": 1,
+    "transport_mode": None,
 }
 
 
 class SessionStore:
-    """Stockage en mémoire des contraintes par session_id."""
+    """Stockage en mémoire des contraintes par session_id, plus métadonnées
+    de dialogue (dernier champ demandé)."""
 
     def __init__(self):
         self._sessions: dict[str, dict] = {}
+        self._meta: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     def get(self, session_id: str) -> dict:
@@ -67,9 +72,18 @@ class SessionStore:
         with self._lock:
             self._sessions[session_id] = dict(constraints)
 
+    def get_meta(self, session_id: str) -> dict:
+        with self._lock:
+            return dict(self._meta.get(session_id, {}))
+
+    def set_meta(self, session_id: str, meta: dict):
+        with self._lock:
+            self._meta[session_id] = dict(meta)
+
     def reset(self, session_id: str):
         with self._lock:
             self._sessions.pop(session_id, None)
+            self._meta.pop(session_id, None)
 
 
 _store = SessionStore()
@@ -129,27 +143,12 @@ def merge_constraints(current: dict, update: dict) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Cache des données ville (un seul fetch par ville par run)
+# Chargement des données ville (sans cache : LLM appelé à chaque requête)
 # ─────────────────────────────────────────────
 
-_city_cache: dict[str, dict] = {}
-_city_cache_lock = threading.Lock()
-
-
-def load_city_data(city_name: str) -> Optional[dict]:
-    """Charge les données d'une ville (avec mémoïsation en mémoire)."""
-    key = city_name.strip().lower()
-    with _city_cache_lock:
-        if key in _city_cache:
-            return _city_cache[key]
-
-    # LLM génère les activités pour n'importe quelle ville (avec cache 30j)
-    data = generate_city_data(city_name)
-
-    if data:
-        with _city_cache_lock:
-            _city_cache[key] = data
-    return data
+def load_city_data(city_name: str, transport_mode: str = "foot") -> Optional[dict]:
+    """Génère les données d'une ville via le LLM. Pas de cache : toujours frais."""
+    return generate_city_data(city_name, transport_mode=transport_mode)
 
 
 # ─────────────────────────────────────────────
@@ -161,6 +160,7 @@ def handle_turn(
     user_message: str,
     solve_timeout: int = 10,
     mode: str = "flexible",
+    transport_mode: Optional[str] = None,
 ) -> dict:
     """
     Traite un tour de conversation.
@@ -177,13 +177,48 @@ def handle_turn(
           "explanation": str | None,     # explication des compromis (si plan produit)
         }
     """
+    import time
+    t_start = time.time()
     errors: list[str] = []
     current = _store.get(session_id)
+    meta = _store.get_meta(session_id)
+    pending_field = meta.get("pending_field")
 
-    # 1. Extraction LLM
-    extracted, extract_err = extract_constraints(user_message, current)
+    # 1. Extraction LLM (avec hint sur le champ en attente pour les réponses courtes)
+    t_ex = time.time()
+    extracted, extract_err = extract_constraints(
+        user_message, current, pending_field=pending_field
+    )
+    extraction_ms = int((time.time() - t_ex) * 1000)
     if extract_err:
         errors.append(f"llm_extract: {extract_err}")
+
+    # Si l'extraction a fait une erreur "API/network" (LLM injoignable) ET
+    # qu'on n'a rien pu extraire ni via regex fallback, on prévient l'utilisateur
+    # plutôt que de boucler.
+    if extract_err and "api error" in extract_err and not extracted:
+        # Notre regex fallback est déjà tenté en interne par extract_constraints
+        # quand pending_field est connu. Si on arrive ici sans rien, c'est qu'il
+        # n'a rien trouvé non plus.
+        reply = (
+            "⚠️ Le service de langage (LLM) est injoignable pour le moment "
+            "— probablement temporaire. Tu peux soit :\n"
+            "• réessayer dans quelques instants,\n"
+            "• ou m'écrire directement les contraintes dans un format simple "
+            "(ex: \"Rome\", \"5\", \"2000\", \"9h-18h\"), je les comprendrai "
+            "même sans le LLM."
+        )
+        return {
+            "reply": reply,
+            "extracted": {},
+            "constraints": current,
+            "plan": None,
+            "city": {"name": current.get("destination") or ""},
+            "errors": errors,
+            "needs_info": reply,
+            "explanation": None,
+            "llm_unreachable": True,
+        }
 
     # 2. Merge
     merged = merge_constraints(current, extracted)
@@ -194,6 +229,17 @@ def handle_turn(
     pending_question = next_question(merged, vague_fields)
 
     if pending_question:
+        # Identifier le champ qu'on va demander pour le prochain tour
+        next_missing = get_missing_critical(merged)
+        next_field = next_missing[0] if next_missing else None
+        if next_field is None:
+            # Fallback : trouver le premier champ vague
+            for f in CRITICAL_FIELDS:
+                if vague_fields.get(f):
+                    next_field = f
+                    break
+        _store.set_meta(session_id, {"pending_field": next_field})
+
         # Contraintes critiques incomplètes : ne pas lancer le solveur
         missing_info = format_missing_summary(merged)
         errors.append(f"incomplete_constraints: {missing_info}")
@@ -208,15 +254,24 @@ def handle_turn(
             "explanation": None,
         }
 
+    # Toutes les contraintes critiques sont présentes → nettoyer pending_field
+    _store.set_meta(session_id, {"pending_field": None})
+
     # 4. Données ville (toutes les contraintes critiques sont présentes)
     destination = merged.get("destination", "Rome")
-    city_data = load_city_data(destination)
+    # Priorité au paramètre d'API (sélecteur UI), puis au LLM extract, puis "foot"
+    effective_transport = transport_mode or merged.get("transport_mode") or "foot"
+    if transport_mode:
+        merged["transport_mode"] = transport_mode
+        _store.set(session_id, merged)
+    city_data = load_city_data(destination, transport_mode=effective_transport)
 
     if not city_data:
         errors.append(f"city_not_found: {destination}")
         reply = (
-            f"Je n'ai pas trouvé de données pour '{destination}'. "
-            "Essaye une autre ville ou reste sur Rome."
+            f"⚠️ Le LLM n'a pas pu générer les données pour '{destination}' "
+            "(timeout ou service indisponible). "
+            "Réessaye dans quelques instants, ou tente une ville différente."
         )
         return {
             "reply": reply,
@@ -227,6 +282,7 @@ def handle_turn(
             "errors": errors,
             "needs_info": None,
             "explanation": None,
+            "llm_unreachable": True,
         }
 
     # 5. CP-SAT
@@ -249,6 +305,9 @@ def handle_turn(
         "errors": errors,
         "needs_info": None,
         "explanation": explanation,
+        "source": "chat",
+        "extraction_ms": extraction_ms,
+        "total_pipeline_ms": int((time.time() - t_start) * 1000),
     }
 
 
@@ -258,6 +317,104 @@ def reset_session(session_id: str):
 
 def get_session_state(session_id: str) -> dict:
     return _store.get(session_id)
+
+
+# ─────────────────────────────────────────────
+# Mode formulaire : contraintes structurées directes, sans LLM d'extraction.
+# Sert à comparer NL vs formulaire (objectif 5 du sujet).
+# ─────────────────────────────────────────────
+
+def handle_form(
+    session_id: str,
+    form_constraints: dict,
+    solve_timeout: int = 10,
+    mode: str = "flexible",
+    transport_mode: Optional[str] = None,
+) -> dict:
+    """
+    Pipeline alternatif : reçoit des contraintes déjà structurées (depuis un
+    formulaire UI), saute l'extraction LLM, lance directement
+    data ville → CP-SAT → narration courte (sans LLM si possible).
+
+    Returns le même shape que handle_turn pour rester échangeable côté front.
+    """
+    import time
+    t_start = time.time()
+    errors: list[str] = []
+    current = _store.get(session_id)
+
+    # Merge : les valeurs du formulaire écrasent l'état courant
+    merged = merge_constraints(current, form_constraints)
+    _store.set(session_id, merged)
+
+    # Validation : champs critiques
+    missing = get_missing_critical(merged)
+    if missing:
+        return {
+            "reply": ("Formulaire incomplet : "
+                      + format_missing_summary(merged)),
+            "extracted": form_constraints,
+            "constraints": merged,
+            "plan": None,
+            "city": {"name": merged.get("destination") or ""},
+            "errors": [f"form_incomplete: {missing}"],
+            "needs_info": format_missing_summary(merged),
+            "explanation": None,
+            "source": "form",
+            "extraction_ms": 0,
+        }
+
+    destination = merged.get("destination", "Rome")
+    effective_transport = transport_mode or merged.get("transport_mode") or "foot"
+    if transport_mode:
+        merged["transport_mode"] = transport_mode
+        _store.set(session_id, merged)
+
+    city_data = load_city_data(destination, transport_mode=effective_transport)
+    if not city_data:
+        return {
+            "reply": (f"⚠️ Le LLM n'a pas pu générer les données pour "
+                      f"'{destination}'."),
+            "extracted": form_constraints,
+            "constraints": merged,
+            "plan": None,
+            "city": {"name": destination},
+            "errors": [f"city_not_found: {destination}"],
+            "needs_info": None,
+            "explanation": None,
+            "source": "form",
+            "extraction_ms": 0,
+            "llm_unreachable": True,
+        }
+
+    plan = solve_with_city_data(
+        merged, city_data, time_limit_seconds=solve_timeout, mode=mode
+    )
+    explanation = explain_solution(plan, merged)
+
+    # En mode formulaire on génère une narration courte déterministe (pas de LLM
+    # pour rester strictement comparable à un formulaire instantané).
+    summary = plan.get("summary", {}) if plan else {}
+    reply = (
+        f"Plan généré pour {destination} : "
+        f"{summary.get('total_activities', 0)} activités sur "
+        f"{merged.get('num_days')} jours, "
+        f"{summary.get('total_cost', 0)}€ / {summary.get('budget', 0)}€."
+    )
+
+    return {
+        "reply": reply,
+        "extracted": form_constraints,
+        "constraints": merged,
+        "plan": plan,
+        "city": city_data.get("city", {}),
+        "errors": errors,
+        "needs_info": None,
+        "explanation": explanation,
+        "source": "form",
+        "extraction_ms": 0,  # bypass LLM = 0ms d'extraction
+        "total_pipeline_ms": int((time.time() - t_start) * 1000),
+    }
 
 
 # ─────────────────────────────────────────────

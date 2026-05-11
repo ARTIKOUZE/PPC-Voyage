@@ -37,7 +37,18 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.medium.text-generatio
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3.6-35b-a3b")
 
+# Fallback : modèle plus léger (omnicoder-9b) sur un autre endpoint.
+# Utilisé automatiquement si l'endpoint principal échoue (timeout, 5xx, etc.).
+LLM_BASE_URL_FALLBACK = os.environ.get(
+    "LLM_BASE_URL_FALLBACK", "https://api.mini.text-generation-webui.myia.io/v1"
+)
+LLM_API_KEY_FALLBACK = os.environ.get(
+    "LLM_API_KEY_FALLBACK", "FEECE4DF2224BF0A5E28A1A4378BD20B"
+)
+LLM_MODEL_FALLBACK = os.environ.get("LLM_MODEL_FALLBACK", "omnicoder-9b")
+
 _client: Optional[OpenAI] = None
+_client_fallback: Optional[OpenAI] = None
 
 # Hard-disable du mode "thinking" de qwen3 : sans ça le modèle consomme tous les
 # max_tokens en raisonnement interne (tokens cachés mais comptés) et renvoie un
@@ -49,8 +60,70 @@ QWEN_NO_THINK = {"chat_template_kwargs": {"enable_thinking": False}}
 def get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY or "dummy")
+        # Timeout explicite pour éviter de bloquer l'UI si l'endpoint est lent
+        _client = OpenAI(
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY or "dummy",
+            timeout=60.0,
+            max_retries=1,
+        )
     return _client
+
+
+def get_fallback_client() -> OpenAI:
+    global _client_fallback
+    if _client_fallback is None:
+        _client_fallback = OpenAI(
+            base_url=LLM_BASE_URL_FALLBACK,
+            api_key=LLM_API_KEY_FALLBACK or "dummy",
+            timeout=60.0,
+            max_retries=1,
+        )
+    return _client_fallback
+
+
+def chat_with_fallback(timeout: Optional[float] = None, **kwargs):
+    """
+    Lance un chat.completions.create sur l'endpoint principal et bascule
+    automatiquement sur le fallback en cas d'échec (timeout, 5xx, JSON vide).
+
+    Args:
+        timeout: override le timeout par défaut du client (pour appels lourds)
+        **kwargs: paramètres OpenAI standards (messages, max_tokens, etc.)
+            `model` est automatiquement remplacé par le modèle correspondant
+            à chaque endpoint, sauf s'il est explicitement passé.
+
+    Returns:
+        L'objet ChatCompletion (peut venir du primaire ou du fallback).
+
+    Raises:
+        La dernière exception si les DEUX endpoints échouent.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    last_err: Optional[Exception] = None
+
+    for label, client, default_model in [
+        ("primary", get_client(), LLM_MODEL),
+        ("fallback", get_fallback_client(), LLM_MODEL_FALLBACK),
+    ]:
+        try:
+            call_kwargs = dict(kwargs)
+            # Le modèle dépend de l'endpoint : si l'appelant n'a pas forcé,
+            # on prend le modèle par défaut de cet endpoint.
+            call_kwargs.setdefault("model", default_model)
+            if label == "fallback":
+                # Forcer le modèle du fallback (ignore le model du primaire)
+                call_kwargs["model"] = default_model
+            target = client.with_options(timeout=timeout) if timeout else client
+            return target.chat.completions.create(**call_kwargs)
+        except Exception as e:
+            last_err = e
+            logger.warning("[LLM/%s] échec : %s — tentative suivante", label, e)
+
+    # Les deux endpoints ont échoué
+    assert last_err is not None
+    raise last_err
 
 
 # ─────────────────────────────────────────────
@@ -59,6 +132,7 @@ def get_client() -> OpenAI:
 
 VALID_CATEGORIES = ["culture", "gastro", "nature", "shopping", "nightlife"]
 VALID_PACES = ["relaxed", "moderate", "intense"]
+VALID_TRANSPORT = ["foot", "bike", "car"]
 
 
 class ExtractedConstraints(BaseModel):
@@ -87,6 +161,8 @@ class ExtractedConstraints(BaseModel):
     day_start_hour: Optional[int] = Field(None, ge=0, le=23)
     day_end_hour: Optional[int] = Field(None, ge=1, le=24)
 
+    transport_mode: Optional[str] = None  # "foot", "bike", "car"
+
     def clean(self) -> dict:
         """Retourne un dict ne contenant que les champs renseignés et validés."""
         out = {}
@@ -98,6 +174,8 @@ class ExtractedConstraints(BaseModel):
             if k == "preferred_pace" and v not in VALID_PACES:
                 continue
             if k == "morning_preference" and v not in VALID_CATEGORIES:
+                continue
+            if k == "transport_mode" and v not in VALID_TRANSPORT:
                 continue
             if k == "must_visit_on_day":
                 # Valider : clés = strings, valeurs = entiers ≥ 1
@@ -138,6 +216,7 @@ AUTHORIZED FIELDS:
 - min_activities_per_day (int)
 - day_start_hour (int, 0-23): hour when the user wants to start activities each day (e.g. 9 for 9h)
 - day_end_hour (int, 1-24): hour when the user wants to stop activities each day (e.g. 18 for 18h, 24 for midnight)
+- transport_mode (string): "foot" (walking, default), "bike" (vélo), or "car" (voiture). Detect from words like "à pied", "marche", "vélo", "voiture", "en bus" (→ car).
 
 STRICT RULES:
 1. Respond ONLY with valid JSON (no markdown, no ```, no comments).
@@ -216,32 +295,54 @@ def _extract_json_blob(text: str) -> str:
     return m.group(0) if m else text
 
 
+_PENDING_FIELD_HINTS: dict[str, str] = {
+    "destination": "destination (city name)",
+    "total_budget": "total_budget (integer, euros)",
+    "num_days": "num_days (integer, number of days)",
+    "day_start_hour": "day_start_hour (integer 0-23, hour to start activities)",
+    "day_end_hour": "day_end_hour (integer 1-24, hour to stop activities)",
+}
+
+
 def extract_constraints(
     user_message: str,
     current_constraints: Optional[dict] = None,
     max_retries: int = 1,
+    pending_field: Optional[str] = None,
 ) -> tuple[dict, Optional[str]]:
     """
     Extrait les contraintes d'un message utilisateur.
+
+    Args:
+        pending_field: si le bot vient d'asker pour un champ donné, on l'indique
+            au LLM pour qu'il interprète correctement une réponse courte
+            (ex: "5" → num_days=5 si pending_field="num_days").
 
     Returns:
         (constraints_dict, error_message_or_None)
         constraints_dict ne contient que les champs à modifier.
     """
     current_constraints = current_constraints or {}
-    client = get_client()
+
+    hint = ""
+    if pending_field and pending_field in _PENDING_FIELD_HINTS:
+        hint = (
+            f"\n\nIMPORTANT: The assistant just asked the user for the field "
+            f"\"{_PENDING_FIELD_HINTS[pending_field]}\". "
+            f"Even if the reply is very short (a bare number, an hour, a single word), "
+            f"interpret it as the value of that field."
+        )
 
     user_content = (
         f"Contraintes actuelles : {json.dumps(current_constraints, ensure_ascii=False)}\n\n"
-        f"Message utilisateur : \"{user_message}\"\n\n"
+        f"Message utilisateur : \"{user_message}\"{hint}\n\n"
         "Extrais les contraintes modifiées en JSON strict."
     )
 
     last_err = None
     for attempt in range(max_retries + 1):
         try:
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
+            resp = chat_with_fallback(
                 messages=[
                     {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                     {"role": "user", "content": user_content},
@@ -254,14 +355,127 @@ def extract_constraints(
             raw = resp.choices[0].message.content or ""
             blob = _extract_json_blob(raw)
             data = json.loads(blob)
-            return ExtractedConstraints(**data).clean(), None
+            extracted = ExtractedConstraints(**data).clean()
+            # Si LLM n'a rien extrait et qu'un champ est attendu, fallback regex
+            if not extracted and pending_field:
+                fb = parse_bare_reply(pending_field, user_message)
+                if fb is not None:
+                    extracted = {pending_field: fb}
+                    # Cohérence : ajouter aussi day_end_hour si on extrait des plages "9h-18h"
+                    if pending_field == "day_start_hour":
+                        end_fb = parse_bare_reply("day_end_hour", user_message)
+                        if end_fb is not None:
+                            extracted["day_end_hour"] = end_fb
+            return extracted, None
 
         except (json.JSONDecodeError, ValidationError, TypeError) as e:
             last_err = f"parse error (attempt {attempt}): {e}"
         except Exception as e:
             last_err = f"api error (attempt {attempt}): {e}"
 
+    # En cas d'échec LLM complet, tenter un fallback regex si on a un pending_field
+    if pending_field:
+        fb = parse_bare_reply(pending_field, user_message)
+        if fb is not None:
+            return {pending_field: fb}, None
+
     return {}, last_err
+
+
+# ─────────────────────────────────────────────
+# Fallback regex pour les réponses courtes en multi-tour
+# ─────────────────────────────────────────────
+
+_HOUR_RANGE_RE = re.compile(
+    r"(?:de\s+)?(\d{1,2})\s*h(?:\s*\d{2})?\s*(?:[-àa]|jusqu'?[àa])\s*(\d{1,2})\s*h",
+    re.IGNORECASE,
+)
+_HOUR_SINGLE_RE = re.compile(r"(\d{1,2})\s*h(?:\d{2})?", re.IGNORECASE)
+_INT_RE = re.compile(r"\b(\d{1,5})\b")
+
+
+def parse_bare_reply(field: str, message: str) -> Optional[object]:
+    """
+    Parse déterministe d'une réponse utilisateur courte pour un champ critique.
+    Utilisé en fallback quand le LLM échoue à extraire (ex: réponse "5" à
+    "combien de jours ?").
+
+    Returns:
+        La valeur typée pour le champ, ou None si rien ne matche.
+    """
+    if not message or not isinstance(message, str):
+        return None
+    msg = message.strip()
+
+    if field == "destination":
+        # Prendre la portion non-numérique de la réponse comme nom de ville
+        cleaned = re.sub(r"[^\w\s\-']", " ", msg, flags=re.UNICODE).strip()
+        # Retirer les chiffres et garder les mots restants
+        words = [w for w in cleaned.split() if not w.isdigit() and len(w) >= 2]
+        if not words:
+            return None
+        candidate = " ".join(words).strip()
+        return candidate if len(candidate) >= 2 else None
+
+    if field == "day_start_hour":
+        m = _HOUR_RANGE_RE.search(msg)
+        if m:
+            val = int(m.group(1))
+            if 0 <= val <= 23:
+                return val
+        m = _HOUR_SINGLE_RE.search(msg)
+        if m:
+            val = int(m.group(1))
+            if 0 <= val <= 23:
+                return val
+        m = _INT_RE.search(msg)
+        if m:
+            val = int(m.group(1))
+            if 0 <= val <= 23:
+                return val
+        return None
+
+    if field == "day_end_hour":
+        m = _HOUR_RANGE_RE.search(msg)
+        if m:
+            val = int(m.group(2))
+            if 1 <= val <= 24:
+                return val
+        # Si "à 22h" sans plage, retourner cette valeur
+        m = _HOUR_SINGLE_RE.search(msg)
+        if m:
+            val = int(m.group(1))
+            if 1 <= val <= 24:
+                return val
+        m = _INT_RE.search(msg)
+        if m:
+            val = int(m.group(1))
+            if 1 <= val <= 24:
+                return val
+        return None
+
+    if field == "total_budget":
+        # Chercher d'abord un grand nombre (probablement le budget)
+        nums = [int(x) for x in _INT_RE.findall(msg)]
+        if not nums:
+            return None
+        # Prendre le plus grand entier ≥ 50 (un budget plausible)
+        candidates = [n for n in nums if n >= 50]
+        if candidates:
+            return max(candidates)
+        return None
+
+    if field == "num_days":
+        nums = [int(x) for x in _INT_RE.findall(msg)]
+        if not nums:
+            return None
+        # Prendre le premier entier dans [1, 21]
+        for n in nums:
+            if 1 <= n <= 21:
+                return n
+        return None
+
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -297,9 +511,8 @@ def narrate_plan(
     constraints: dict,
     extracted_changes: dict,
 ) -> str:
-    """Génère la réponse conversationnelle à afficher dans le chat."""
-    client = get_client()
-
+    """Génère la réponse conversationnelle à afficher dans le chat.
+    En cas d'échec LLM, retourne un fallback déterministe pour ne pas bloquer l'UI."""
     plan_summary = _summarize_plan(plan, constraints)
     changes_str = json.dumps(extracted_changes, ensure_ascii=False) if extracted_changes else "aucune"
 
@@ -310,18 +523,34 @@ def narrate_plan(
         "Réponds en 2-3 phrases max."
     )
 
-    resp = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {"role": "system", "content": NARRATION_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.7,
-        max_tokens=400,
-        extra_body=QWEN_NO_THINK,
+    try:
+        resp = chat_with_fallback(
+            messages=[
+                {"role": "system", "content": NARRATION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.7,
+            max_tokens=400,
+            extra_body=QWEN_NO_THINK,
+        )
+        raw = resp.choices[0].message.content or ""
+        narration = _strip_thinking(raw).strip()
+        if narration:
+            return narration
+    except Exception:
+        pass
+
+    # Fallback déterministe si le LLM n'a rien renvoyé ou a planté
+    if not plan or plan.get("status") == "INFEASIBLE":
+        return ("Je n'ai pas réussi à construire un plan satisfaisant toutes tes "
+                "contraintes. Tu peux essayer d'élargir le budget ou la durée.")
+    summary = plan.get("summary", {})
+    return (
+        f"Voilà ton plan pour {constraints.get('destination', 'la ville')} : "
+        f"{summary.get('total_activities', 0)} activités sur "
+        f"{constraints.get('num_days', '?')} jours, "
+        f"pour {summary.get('total_cost', 0)}€ sur {summary.get('budget', 0)}€."
     )
-    raw = resp.choices[0].message.content or ""
-    return _strip_thinking(raw).strip()
 
 
 # ─────────────────────────────────────────────

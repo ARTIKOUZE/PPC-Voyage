@@ -21,7 +21,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-from llm_client import get_client, LLM_MODEL, QWEN_NO_THINK, _strip_thinking, _extract_json_blob
+from llm_client import (
+    chat_with_fallback, QWEN_NO_THINK, _strip_thinking, _extract_json_blob,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +41,11 @@ def _norm(name: str) -> str:
 # Cache
 # ─────────────────────────────────────────────────────────────────────────────
 
-try:
-    from cache.cache_manager import CacheManager
-    _cache = CacheManager()
-    _CACHE_AVAILABLE = True
-except ImportError:
-    _cache = None  # type: ignore
-    _CACHE_AVAILABLE = False
-
-TTL_LLM_CITY = 720  # 30 jours — la géographie ne change pas
+# Cache désactivé : chaque requête appelle le LLM (données toujours fraîches,
+# fonctionne pour n'importe quelle ville sans pré-cache).
+_cache = None
+_CACHE_AVAILABLE = False
+TTL_LLM_CITY = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,9 +72,20 @@ class LLMActivity(BaseModel):
         return self.category if self.category in VALID_CATEGORIES else "culture"
 
 
+class LLMHotel(BaseModel):
+    name: str
+    address: str = ""
+    price_per_night: int = Field(ge=0)
+    stars: int = Field(ge=0, le=5, default=3)
+    latitude: float = Field(ge=-90.0, le=90.0)
+    longitude: float = Field(ge=-180.0, le=180.0)
+    description: str = ""
+
+
 class LLMCityData(BaseModel):
     city: dict
     activities: list[LLMActivity]
+    hotels: list[LLMHotel] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,50 +93,47 @@ class LLMCityData(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 CITY_ACTIVITIES_PROMPT = """\
-You are a travel data expert with complete knowledge of tourist attractions worldwide.
+You are a travel data expert. Generate tourist data for: {city_name}
 
-Generate a list of the best tourist activities for the city: {city_name}
+Return ONLY a valid JSON object. No markdown, no explanations.
 
-Return ONLY a valid JSON object. No markdown, no ```, no explanation.
-
-Required structure:
+Structure:
 {{
-  "city": {{
-    "name": "<official city name>",
-    "country": "<ISO 2-letter country code>",
-    "latitude": <city center lat>,
-    "longitude": <city center lon>,
-    "population": <approximate population as integer>
-  }},
-  "activities": [
-    {{
-      "id": "<slug_lowercase_no_spaces>",
-      "name": "<Activity name in French>",
-      "category": "<culture|gastro|nature|shopping|nightlife>",
-      "duration_hours": <float, typical visit time>,
-      "cost_euros": <integer, entrance fee in euros, 0 if free>,
-      "opening_hour": <integer 0-23>,
-      "closing_hour": <integer 1-24>,
-      "latitude": <accurate GPS latitude>,
-      "longitude": <accurate GPS longitude>,
-      "priority_score": <integer 1-10, 10=iconic must-see>,
-      "confidence": <float 0.80-0.95>
-    }},
-    ...
-  ]
+  "city": {{"name":"...","country":"<2-letter ISO>","latitude":<lat>,"longitude":<lon>,"population":<int>}},
+  "activities": [ {{"id":"slug","name":"<French>","category":"<culture|gastro|nature|shopping|nightlife>","duration_hours":<float>,"cost_euros":<int>,"opening_hour":<int>,"closing_hour":<int>,"latitude":<lat>,"longitude":<lon>,"priority_score":<1-10>,"confidence":<0.80-0.95>}}, ... ],
+  "hotels": [ {{"name":"<real hotel>","address":"<full address>","price_per_night":<int>,"stars":<1-5>,"latitude":<lat>,"longitude":<lon>,"description":"<French, <12 words>"}}, ... ]
 }}
 
 RULES:
-1. Generate exactly 22 activities, diverse across categories.
-2. Include top-5 iconic landmarks (priority_score 9-10).
-3. Include 3-4 gastro experiences (local restaurants, food markets, cooking classes).
-4. Include 2-3 nature/parks activities.
-5. Include 1-2 shopping/nightlife activities if relevant to the city.
-6. GPS coordinates must be accurate (4+ decimal places) for each specific location.
-7. Prices in euros — convert from local currency if needed, use 0 for free sites.
-8. All activity names in French (e.g., "Musée du Louvre", "Tour Eiffel").
-9. id must be a unique lowercase ASCII slug (e.g., "louvre", "eiffel_tower").
-10. confidence: 0.90-0.95 for world-famous sites, 0.80-0.88 for well-known local spots.
+- Exactly 15 activities, diverse across the 5 categories.
+- Mix: 5 iconic (priority 9-10), 3 gastro, 2-3 nature, 1-2 shopping/nightlife if relevant.
+- Activity names in French. id = unique ASCII slug. GPS 4+ decimals. Prices in euros.
+
+REALISTIC duration_hours (use these typical visit times from real tourist averages):
+- Major museum (Louvre, Met, British Museum, Prado): 3.0–4.0
+- Standard museum / gallery: 1.5–2.5
+- Iconic monument with visit (Eiffel Tower up, Colosseum inside): 2.0–3.0
+- Quick photo-stop monument (Trevi, Brandenburg Gate): 0.5–1.0
+- Cathedral / church visit: 0.5–1.5 (1.5 only for major ones like Sagrada Familia)
+- Restaurant / food tour / cooking class: 1.5–2.5
+- Market / food market visit: 1.0–1.5
+- Park / garden stroll: 1.0–2.0
+- Day trip outside city (e.g., Versailles, Pompeii): 4.0–6.0
+- Neighborhood walk: 1.5–2.5
+- Bar / nightclub session: 2.0–3.0
+- Shopping district: 1.5–2.5
+Pick the appropriate value for each specific activity — do NOT default to 1.5.
+
+REALISTIC opening_hour / closing_hour (use real opening hours, not 8-22 by default):
+- Museums: typically open 9-10, close 17-18
+- Restaurants: open 12 or 19, close 14 or 23 (lunch + dinner)
+- Bars / clubs: open 18-21, close 24
+- Parks: open 6-8, close 20-22
+- Markets: open 6-9, close 14-16
+- Outdoor monuments (Eiffel base, Trevi): open 0, close 24 (always accessible)
+
+- Exactly 3 REAL hotels in the city: 1 budget (50-90€, 2-3★), 1 mid-range (100-180€, 3-4★), 1 premium (200-400€, 4-5★). Real names + addresses.
+- Be CONCISE: no extra fields, no commentary. Output the JSON and stop.
 """
 
 
@@ -135,21 +141,22 @@ RULES:
 # Appel LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_llm_for_city(city_name: str, max_retries: int = 2) -> Optional[dict]:
-    """Appelle le LLM et retourne le dict JSON brut, ou None en cas d'échec."""
-    client = get_client()
+def _call_llm_for_city(city_name: str, max_retries: int = 1) -> Optional[dict]:
+    """Appelle le LLM (primaire + fallback) et retourne le dict JSON brut,
+    ou None en cas d'échec total.
+    Timeout par appel : 180 s (génération de 15 activités + 3 hôtels = lourd)."""
     prompt = CITY_ACTIVITIES_PROMPT.format(city_name=city_name)
 
     last_err = None
     for attempt in range(max_retries + 1):
         try:
-            resp = client.chat.completions.create(
-                model=LLM_MODEL,
+            resp = chat_with_fallback(
+                timeout=180.0,
                 messages=[
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=3000,
+                max_tokens=3500,
                 response_format={"type": "json_object"},
                 extra_body=QWEN_NO_THINK,
             )
@@ -231,6 +238,24 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
                          len(activities), city_name)
             return None
 
+        # Hôtels (optionnel)
+        hotels = []
+        for item in raw.get("hotels", []) or []:
+            try:
+                h = LLMHotel(**item)
+                hotels.append({
+                    "name": h.name,
+                    "address": h.address,
+                    "price_per_night": h.price_per_night,
+                    "stars": h.stars,
+                    "latitude": h.latitude,
+                    "longitude": h.longitude,
+                    "description": h.description,
+                })
+            except (ValidationError, TypeError) as e:
+                logger.debug("[LLMCity] Hôtel invalide ignoré: %s — %s",
+                             item.get("name", "?"), e)
+
         return {
             "city": {
                 "name": city_info.get("name", city_name),
@@ -240,6 +265,7 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
                 "population": int(city_info.get("population", 0)),
             },
             "activities": activities,
+            "hotels": hotels,
         }
 
     except Exception as e:
@@ -265,19 +291,26 @@ def _assign_zones(activities: list[dict], city_lat: float, city_lon: float) -> N
             act["zone"] = "sud-ouest"
 
 
-def _compute_travel_matrix(activities: list[dict]) -> Optional[list[list[int]]]:
+_TRANSPORT_SPEEDS_MPH = {"foot": 4000, "bike": 15000, "car": 30000}  # mètres/heure
+
+
+def _compute_travel_matrix(
+    activities: list[dict],
+    transport_mode: str = "foot",
+) -> Optional[list[list[int]]]:
     """Calcule la matrice OSRM, ou une matrice haversine de fallback."""
     try:
         from data_provider import osrm_travel_matrix
         coords = [(a["latitude"], a["longitude"]) for a in activities]
-        matrix = osrm_travel_matrix(coords, "foot")
+        matrix = osrm_travel_matrix(coords, transport_mode)
         if matrix:
             return matrix
     except Exception as e:
         logger.warning("[LLMCity] OSRM error: %s — fallback haversine", e)
 
-    # Fallback : estimation haversine (vitesse pied ~4 km/h)
+    # Fallback : estimation haversine selon mode de transport
     logger.warning("[LLMCity] Matrice haversine utilisée (OSRM indisponible)")
+    speed_mh = _TRANSPORT_SPEEDS_MPH.get(transport_mode, 4000)
     coords = [(a["latitude"], a["longitude"]) for a in activities]
     n = len(coords)
     matrix = []
@@ -296,7 +329,7 @@ def _compute_travel_matrix(activities: list[dict]) -> Optional[list[list[int]]]:
                 a = (math.sin(dphi / 2) ** 2
                      + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
                 dist_m = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-                minutes = max(1, round(dist_m / (4000 / 60)))
+                minutes = max(1, round(dist_m / (speed_mh / 60)))
                 row.append(minutes)
         matrix.append(row)
     return matrix
@@ -306,15 +339,21 @@ def _compute_travel_matrix(activities: list[dict]) -> Optional[list[list[int]]]:
 # Point d'entrée public
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_city_data(city_name: str) -> Optional[dict]:
+def generate_city_data(
+    city_name: str,
+    transport_mode: str = "foot",
+) -> Optional[dict]:
     """
     Génère (ou charge depuis le cache) les données complètes d'une ville.
 
     Retourne un dict compatible avec le solveur :
-        {"city": {...}, "activities": [...], "travel_matrix": [[...]], ...}
+        {"city": {...}, "activities": [...], "travel_matrix": [[...]],
+         "hotels": [...], "transport_mode": "foot", ...}
     ou None en cas d'échec.
     """
-    cache_key = f"llm_city_{city_name.lower().replace(' ', '_')}"
+    # Pour rester compatible avec les anciens caches : pas de suffixe pour "foot"
+    base_key = f"llm_city_{city_name.lower().replace(' ', '_')}"
+    cache_key = base_key if transport_mode == "foot" else f"{base_key}_{transport_mode}"
 
     # 1. Cache
     if _CACHE_AVAILABLE and _cache:
@@ -342,12 +381,13 @@ def generate_city_data(city_name: str) -> Optional[dict]:
     # 4. Zones
     _assign_zones(data["activities"], city_lat, city_lon)
 
-    # 5. Matrice de trajets
-    matrix = _compute_travel_matrix(data["activities"])
+    # 5. Matrice de trajets selon le mode de transport
+    matrix = _compute_travel_matrix(data["activities"], transport_mode)
     if not matrix:
         return None
 
     data["travel_matrix"] = matrix
+    data["transport_mode"] = transport_mode
     data["data_source"] = "llm+osrm"
 
     confs = [a.get("confidence", 0.0) for a in data["activities"]]

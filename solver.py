@@ -15,6 +15,7 @@ from ortools.sat.python import cp_model
 from dataclasses import dataclass, field
 from typing import Optional
 import json
+import math
 
 
 # ─────────────────────────────────────────────
@@ -149,6 +150,17 @@ TRAVEL_TIMES = {
 }
 
 
+def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance en mètres entre deux points GPS (formule haversine)."""
+    R = 6_371_000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = (math.sin(dphi / 2) ** 2
+         + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 def get_travel_time(zone_a: str, zone_b: str) -> int:
     """Retourne le temps de trajet en minutes entre deux zones."""
     if (zone_a, zone_b) in TRAVEL_TIMES:
@@ -191,10 +203,12 @@ class TravelPlannerSolver:
         constraints: TravelConstraints,
         travel_matrix: Optional[list[list[int]]] = None,
         mode: str = "flexible",
+        transport_mode: str = "foot",
     ):
         self.activities = {a.id: a for a in activities}
         self.constraints = constraints
         self.mode = mode  # "flexible" | "strict"
+        self._transport_mode = transport_mode  # "foot", "bike", "car"
         self.model = cp_model.CpModel()
 
         # Index activity_id -> position dans travel_matrix
@@ -215,6 +229,8 @@ class TravelPlannerSolver:
         self._build_model()
 
     def _build_model(self):
+        # Variables temporaires pour la pénalité de trajet (remplies par _add_capacity_constraints)
+        self._pair_both_assigned: dict = {}
         self._create_variables()
         self._add_budget_constraints()          # Type 1
         self._add_temporal_constraints()         # Type 2
@@ -222,6 +238,7 @@ class TravelPlannerSolver:
         self._add_capacity_constraints()         # Type 4
         self._add_soft_preferences()             # Type 5
         self._add_cardinality_constraints()      # Type 6
+        self._add_travel_penalty()               # Optimisation : minimiser temps de trajet
         self._set_objective()
 
     def _create_variables(self):
@@ -281,13 +298,32 @@ class TravelPlannerSolver:
         # Budget total pour les activités
         hotel_total = C.hotel_per_night * C.num_days * C.num_travelers
         food_total = C.daily_food_budget * C.num_days * C.num_travelers
-        activity_budget = C.total_budget - hotel_total - food_total
+        activity_budget = max(0, C.total_budget - hotel_total - food_total)
+        self._activity_budget = activity_budget
 
         activity_cost = sum(
             self.selected[a_id] * act.cost_euros * C.num_travelers
             for a_id, act in self.activities.items()
         )
-        self.model.add(activity_cost <= max(0, activity_budget))
+        self.model.add(activity_cost <= activity_budget)
+
+        # Soft : pénaliser une trop grosse sous-utilisation du budget activités.
+        # Cible : dépenser au moins 70 % du budget activités s'il dépasse 100 €.
+        # On évite de pénaliser quand le budget est très serré (≤ 100 €).
+        if activity_budget > 100:
+            target_spend = (activity_budget * 7) // 10
+            underspend = self.model.new_int_var(
+                0, activity_budget, "activity_underspend"
+            )
+            self.model.add(underspend >= target_spend - activity_cost)
+            self.model.add(underspend >= 0)
+            # Pénalité = underspend // 20 (1 point par 20€ de sous-dépense).
+            # Doit rester ~comparable aux bonus d'activité (~5-13 par act).
+            penalty_var = self.model.new_int_var(
+                0, activity_budget // 20 + 1, "activity_underspend_pen"
+            )
+            self.model.add_division_equality(penalty_var, underspend, 20)
+            self.soft_penalties.append(penalty_var)
 
         # Budget quotidien food : les activités gastro comptent dans le budget food
         for d in range(C.num_days):
@@ -303,27 +339,26 @@ class TravelPlannerSolver:
     def _day_window_slots(self) -> tuple[int, int]:
         """
         Calcule la fenêtre horaire journalière en slots (1 slot = 30 min depuis DAY_START).
-
-        Si l'utilisateur demande start=10h end=18h, une marge de ±30min est appliquée :
-          → fenêtre effective = [9h30, 18h30] soit [9.5h, 18.5h]
-          → en slots depuis DAY_START=7h : [(9.5-7)*2, (18.5-7)*2] = [5, 23]
+        La fenêtre fin est stricte (pas de marge) pour respecter l'heure de fin demandée.
+        La fenêtre début admet 30 min de tolérance avant l'heure souhaitée.
 
         Si aucune préférence : fenêtre = toute la journée [DAY_START, DAY_END].
         """
         C = self.constraints
-        MARGIN = 1  # 1 slot = 30 min de marge
+        START_MARGIN = 1  # tolérance de 30 min avant l'heure de début demandée
 
         if C.day_start_hour is not None:
             raw_start = max(self.DAY_START, C.day_start_hour)
-            win_start = max(0, (raw_start - self.DAY_START) * 2 - MARGIN)
+            win_start = max(0, (raw_start - self.DAY_START) * 2 - START_MARGIN)
         else:
-            win_start = 0  # pas de contrainte : depuis le début de journée
+            win_start = 0
 
         if C.day_end_hour is not None:
             raw_end = min(self.DAY_END, C.day_end_hour)
-            win_end = min(self.SLOTS_PER_DAY, (raw_end - self.DAY_START) * 2 + MARGIN)
+            # Fin stricte : l'activité doit être terminée à l'heure indiquée
+            win_end = min(self.SLOTS_PER_DAY, (raw_end - self.DAY_START) * 2)
         else:
-            win_end = self.SLOTS_PER_DAY  # pas de contrainte : jusqu'en fin de journée
+            win_end = self.SLOTS_PER_DAY
 
         return win_start, win_end
 
@@ -454,6 +489,30 @@ class TravelPlannerSolver:
                         self.assign[b_id, d_b] + self.assign[a_id, d_a] <= 1
                     )
 
+    def _choose_segment_mode(self, foot_minutes: int, dist_m):
+        """
+        Choisit le mode de transport pour un segment donné.
+
+        Règle :
+          - Si le mode global est "car" ou "bike", on garde ce mode (la matrice
+            travel_time est déjà calculée pour ce mode).
+          - Si le mode global est "foot" (défaut) :
+              * marche ≤ 25 min → on garde "foot"
+              * sinon → on bascule sur transports en commun (métro/bus), estimé
+                à ~3× plus rapide que la marche (vitesse moyenne urbaine
+                ~12-15 km/h vs 4 km/h pour la marche), avec un minimum de 8 min
+                (temps d'attente / accès).
+        """
+        base = getattr(self, "_transport_mode", "foot")
+        if base in ("car", "bike"):
+            return (base, foot_minutes)
+        # Mode "foot" : trop long à pied ?
+        long_walk = foot_minutes > 25 and (dist_m is None or dist_m > 1500)
+        if long_walk:
+            transit_min = max(8, foot_minutes // 3 + 5)
+            return ("transit", transit_min)
+        return ("foot", foot_minutes)
+
     def _travel_minutes(self, a1_id: str, a2_id: str) -> int:
         """Temps de trajet entre deux activités. Utilise la matrice OSRM si dispo,
         sinon fallback sur la table de zones hardcodée."""
@@ -503,6 +562,8 @@ class TravelPlannerSolver:
                         both_assigned,
                         [self.assign[a1, d], self.assign[a2, d]]
                     )
+                    # Exposé pour _add_travel_penalty
+                    self._pair_both_assigned[(a1, a2, d)] = (both_assigned, travel)
 
                     # a1 avant a2
                     order_var = self.model.new_bool_var(f"order_{a1}_{a2}_d{d}")
@@ -545,9 +606,11 @@ class TravelPlannerSolver:
 
             self.soft_bonuses.append(self.selected[a_id] * score)
 
-        # Préférence de rythme
-        pace_map = {"relaxed": 2, "moderate": 3, "intense": 4}
-        target = pace_map.get(C.preferred_pace, 3)
+        # Préférence de rythme : pénalité asymétrique forte si sous le rythme,
+        # aucune pénalité si on dépasse (le but est de remplir la journée).
+        # Cibles bumpées : "moderate" = 4 activités, etc.
+        pace_map = {"relaxed": 3, "moderate": 4, "intense": 5}
+        target = pace_map.get(C.preferred_pace, 4)
 
         for d in range(C.num_days):
             day_count = sum(
@@ -555,12 +618,13 @@ class TravelPlannerSolver:
                 for a_id in self.activities
                 if (a_id, d) in self.assign
             )
-            # Pénalité pour s'éloigner du rythme cible
-            deviation = self.model.new_int_var(0, 10, f"pace_dev_d{d}")
-            diff = self.model.new_int_var(-10, 10, f"pace_diff_d{d}")
-            self.model.add(diff == day_count - target)
-            self.model.add_abs_equality(deviation, diff)
-            self.soft_penalties.append(deviation * 2)
+            # shortfall = max(0, target - day_count) : pénalise le manque d'activités
+            shortfall = self.model.new_int_var(0, target, f"shortfall_d{d}")
+            self.model.add(shortfall >= target - day_count)
+            self.model.add(shortfall >= 0)
+            self.soft_penalties.append(shortfall * 12)
+            # Pas de pénalité d'overflow : on préfère remplir une journée si
+            # le solveur trouve la place et le budget pour des activités en plus.
 
         # Préférence matin : culture le matin
         if C.morning_preference:
@@ -624,6 +688,22 @@ class TravelPlannerSolver:
             if cat in C.min_per_category:
                 self.model.add(cat_count >= C.min_per_category[cat])
 
+    # ── Pénalité de trajet (optimisation des distances) ────────────────
+
+    def _add_travel_penalty(self):
+        """
+        Nudge soft : encourage le regroupement géographique sans bloquer
+        la sélection de plusieurs activités par jour.
+
+        Échelle : un trajet ≤ 15 min ne coûte rien (intra-quartier),
+        un trajet de 60 min vaut ~4 points (vs ~10 points de bonus par
+        activité), un trajet de 100 min en vaut ~8.
+        """
+        for (a1, a2, d), (both_assigned, travel_min) in self._pair_both_assigned.items():
+            weight = max(0, (int(travel_min) - 15) // 10)
+            if weight > 0:
+                self.soft_penalties.append(both_assigned * weight)
+
     # ── Objectif ────────────────────────────────────
 
     def _set_objective(self):
@@ -685,10 +765,38 @@ class TravelPlannerSolver:
             # Trier par heure de début
             day_activities.sort(key=lambda x: x["start_time"])
 
+            # Calculer les transitions (trajets) entre activités consécutives.
+            # Choix du mode par segment : on n'oblige pas l'utilisateur à marcher 1h.
+            transitions = []
+            for i in range(len(day_activities) - 1):
+                a1 = day_activities[i]
+                a2 = day_activities[i + 1]
+                travel_min = self._travel_minutes(a1["id"], a2["id"])
+                src = self.activities.get(a1["id"])
+                dst = self.activities.get(a2["id"])
+                dist_m = None
+                if src and dst and src.latitude and dst.latitude:
+                    dist_m = _haversine_meters(
+                        src.latitude, src.longitude,
+                        dst.latitude, dst.longitude,
+                    )
+                mode, minutes = self._choose_segment_mode(int(travel_min), dist_m)
+                transitions.append({
+                    "from_id": a1["id"],
+                    "to_id": a2["id"],
+                    "from_name": a1["name"],
+                    "to_name": a2["name"],
+                    "minutes": minutes,
+                    "distance_m": int(round(dist_m)) if dist_m is not None else None,
+                    "mode": mode,
+                })
+
             plan["days"].append({
                 "day": d + 1,
                 "activities": day_activities,
                 "activity_count": len(day_activities),
+                "transitions": transitions,
+                "total_travel_minutes": sum(t["minutes"] for t in transitions),
             })
 
         hotel_cost = C.hotel_per_night * C.num_days * C.num_travelers
@@ -873,10 +981,42 @@ def solve_with_city_data(
             "violated_soft_constraints": [],
         }
 
+    # Vérif amont : le budget couvre-t-il au moins hôtel + repas ?
+    fixed_cost = (constraints.hotel_per_night + constraints.daily_food_budget) \
+        * constraints.num_days * constraints.num_travelers
+    if fixed_cost > constraints.total_budget:
+        deficit = fixed_cost - constraints.total_budget
+        return {
+            "status": "INFEASIBLE",
+            "message": (
+                f"Budget {constraints.total_budget}€ trop faible : "
+                f"l'hébergement et les repas coûtent déjà {fixed_cost}€ "
+                f"(manque {deficit}€). Augmente le budget, réduis hotel_per_night, "
+                f"ou diminue daily_food_budget."
+            ),
+            "days": [],
+            "summary": {
+                "total_cost": fixed_cost,
+                "budget": constraints.total_budget,
+                "remaining_budget": -deficit,
+                "total_activities": 0,
+                "hotel_cost": constraints.hotel_per_night * constraints.num_days * constraints.num_travelers,
+                "food_cost": constraints.daily_food_budget * constraints.num_days * constraints.num_travelers,
+                "activity_cost": 0,
+            },
+            "stats": {"status_name": "INFEASIBLE_BUDGET"},
+            "respected_constraints": [],
+            "violated_soft_constraints": [
+                f"Budget dépassé de {deficit}€ rien que pour hôtel + repas"
+            ],
+        }
+
     travel_matrix = city_data.get("travel_matrix")
+    transport_mode = city_data.get("transport_mode", "foot")
 
     planner = TravelPlannerSolver(
-        activities, constraints, travel_matrix=travel_matrix, mode=mode
+        activities, constraints,
+        travel_matrix=travel_matrix, mode=mode, transport_mode=transport_mode,
     )
     result = planner.solve(time_limit_seconds=time_limit_seconds)
 
@@ -887,7 +1027,8 @@ def solve_with_city_data(
             "Passage en mode flexible (compromis acceptés)."
         )
         planner_flex = TravelPlannerSolver(
-            activities, constraints, travel_matrix=travel_matrix, mode="flexible"
+            activities, constraints,
+            travel_matrix=travel_matrix, mode="flexible", transport_mode=transport_mode,
         )
         result = planner_flex.solve(time_limit_seconds=time_limit_seconds)
         result["mode_fallback"] = "strict→flexible"
@@ -895,6 +1036,18 @@ def solve_with_city_data(
     # Enrichir avec infos ville + lat/lon dans chaque activité du plan
     result["city"] = city_data.get("city", {})
     result["data_source"] = city_data.get("data_source", "unknown")
+    result["transport_mode"] = transport_mode
+    # Sélectionner un hôtel (si disponible dans city_data) dans le budget de l'utilisateur
+    hotel_options = city_data.get("hotels") or []
+    if hotel_options:
+        budget_per_night = constraints.hotel_per_night
+        # Préférer l'hôtel le plus cher ≤ budget, sinon le moins cher
+        below = [h for h in hotel_options if (h.get("price_per_night") or 0) <= budget_per_night]
+        if below:
+            chosen = max(below, key=lambda h: h.get("price_per_night") or 0)
+        else:
+            chosen = min(hotel_options, key=lambda h: h.get("price_per_night") or 0)
+        result["hotel"] = chosen
     if "days" in result:
         act_by_id = {a.id: a for a in activities}
         for day in result["days"]:

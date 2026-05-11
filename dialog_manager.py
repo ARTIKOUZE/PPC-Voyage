@@ -27,8 +27,6 @@ CRITICAL_FIELDS: dict[str, str] = {
     "destination": "Tu veux partir où ?",
     "total_budget": "Quel est ton budget maximum (en euros) ?",
     "num_days": "Combien de jours dure ton voyage ?",
-    "day_start_hour": "À quelle heure souhaites-tu commencer tes activités chaque jour ? (ex: 9h, 10h)",
-    "day_end_hour": "Jusqu'à quelle heure veux-tu faire des activités ? (ex: 17h, 19h, 22h)",
 }
 
 # Questions pour clarifier les valeurs vagues
