@@ -1,0 +1,161 @@
+<!doctype html><html><head><meta charset='utf-8'><title>Bench LLM Extraction</title><style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: #888; font-size: 13px; margin-bottom: 24px; }
+    .metric-row { display: flex; gap: 14px; margin-bottom: 24px; }
+    .metric { flex: 1; padding: 14px; border-radius: 10px; background: #f5f5f5; }
+    .metric .v { font-size: 26px; font-weight: 700; }
+    .metric .l { font-size: 11px; color: #777; letter-spacing: 0.5px; text-transform: uppercase; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 28px; font-size: 13px; }
+    th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid #eee; }
+    th { background: #fafafa; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #555; }
+    .case { border: 1px solid #eee; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; }
+    .case.fail { border-color: #f4cccc; background: #fff7f7; }
+    .case.pass { border-color: #d6e6c8; background: #f8fbf3; }
+    .case h3 { margin: 0 0 6px; font-size: 14px; }
+    .case .tag { font-size: 10px; padding: 1px 7px; border-radius: 10px; background: #eee; margin-right: 6px; vertical-align: middle; }
+    .case .msg { font-style: italic; color: #444; margin: 6px 0; }
+    pre { background: #f7f7f7; padding: 8px 10px; border-radius: 6px; font-size: 12px; margin: 4px 0; overflow-x: auto; }
+    .match { color: #2e7d32; }
+    .miss { color: #c62828; font-weight: 600; }
+    .small { font-size: 11px; color: #999; }
+    .f1-good { color: #2e7d32; }
+    .f1-ok { color: #f9a825; }
+    .f1-bad { color: #c62828; }
+    </style></head><body><h1>Benchmark d'extraction LLM — Travel Planner</h1><div class='sub'>25 cas testés en 41.8s — modèle : <code>qwen3.6-35b-a3b</code></div><div class='metric-row'><div class='metric'><div class='l'>Précision</div><div class='v f1-good'>0.99</div></div><div class='metric'><div class='l'>Rappel</div><div class='v f1-good'>0.99</div></div><div class='metric'><div class='l'>F1</div><div class='v f1-good'>0.99</div></div><div class='metric'><div class='l'>Slots OK / FP / FN</div><div class='v'>84/1/1</div></div></div><h2>F1 par catégorie d'ambiguïté</h2><table><tr><th>Catégorie</th><th>TP</th><th>FP</th><th>FN</th><th>Précision</th><th>Rappel</th><th>F1</th></tr><tr><td>adversarial</td><td>15</td><td>1</td><td>1</td><td>0.94</td><td>0.94</td><td class='f1-good'>0.94</td></tr><tr><td>complex</td><td>11</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td>conditional</td><td>9</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td>implicit</td><td>8</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td>minimal</td><td>1</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td>negation</td><td>8</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td>preference</td><td>13</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td>simple</td><td>14</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td>vague</td><td>5</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr></table><h2>F1 par champ extrait</h2><table><tr><th>Champ</th><th>TP</th><th>FP</th><th>FN</th><th>Précision</th><th>Rappel</th><th>F1</th></tr><tr><td><code>avoided_categories</code></td><td>4</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>day_end_hour</code></td><td>1</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>day_start_hour</code></td><td>1</td><td>0</td><td>1</td><td>1.00</td><td>0.50</td><td class='f1-bad'>0.67</td></tr><tr><td><code>destination</code></td><td>23</td><td>1</td><td>0</td><td>0.96</td><td>1.00</td><td class='f1-good'>0.98</td></tr><tr><td><code>hotel_per_night</code></td><td>1</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>must_visit</code></td><td>2</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>must_visit_on_day</code></td><td>1</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>num_days</code></td><td>20</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>num_travelers</code></td><td>3</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>preferred_categories</code></td><td>4</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>preferred_pace</code></td><td>2</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>total_budget</code></td><td>20</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr><tr><td><code>transport_mode</code></td><td>2</td><td>0</td><td>0</td><td>1.00</td><td>1.00</td><td class='f1-good'>1.00</td></tr></table><h2>Cas par cas</h2><div class='case pass'><h3>simple-01 <span class='tag'>simple</span> <span class='small'>F1=1.00 · ⏱ 2043ms</span></h3><div class='msg'>« 5 jours à Rome avec un budget de 2000 euros, on adore la culture et la gastronomie »</div><pre>extracted = {
+  "destination": "Rome",
+  "num_days": 5,
+  "total_budget": 2000,
+  "preferred_categories": [
+    "culture",
+    "gastro"
+  ]
+}</pre></div><div class='case pass'><h3>simple-02 <span class='tag'>simple</span> <span class='small'>F1=1.00 · ⏱ 1322ms</span></h3><div class='msg'>« Lisbonne 3 jours 1500€ »</div><pre>extracted = {
+  "destination": "Lisbonne",
+  "num_days": 3,
+  "total_budget": 1500
+}</pre></div><div class='case pass'><h3>simple-03 <span class='tag'>simple</span> <span class='small'>F1=1.00 · ⏱ 1238ms</span></h3><div class='msg'>« On voudrait aller à Tokyo pour une semaine avec 3500 euros »</div><pre>extracted = {
+  "destination": "Tokyo",
+  "num_days": 7,
+  "total_budget": 3500
+}</pre></div><div class='case pass'><h3>simple-04 <span class='tag'>simple</span> <span class='small'>F1=1.00 · ⏱ 1593ms</span></h3><div class='msg'>« Madrid, 4 jours, budget 2000€, on est 2 »</div><pre>extracted = {
+  "destination": "Madrid",
+  "num_days": 4,
+  "total_budget": 2000,
+  "num_travelers": 2
+}</pre></div><div class='case pass'><h3>vague-01 <span class='tag'>vague</span> <span class='small'>F1=1.00 · ⏱ 1188ms</span></h3><div class='msg'>« Voyage à Paris pour une semaine, budget confortable »</div><pre>extracted = {
+  "destination": "Paris",
+  "num_days": 7
+}</pre></div><div class='case pass'><h3>vague-02 <span class='tag'>vague</span> <span class='small'>F1=1.00 · ⏱ 1684ms</span></h3><div class='msg'>« Quelques jours à Berlin avec environ 800 euros »</div><pre>extracted = {
+  "destination": "Berlin",
+  "total_budget": 800
+}</pre></div><div class='case pass'><h3>vague-03 <span class='tag'>vague</span> <span class='small'>F1=1.00 · ⏱ 1139ms</span></h3><div class='msg'>« On veut un séjour pas trop cher à Marrakech, plutôt court »</div><pre>extracted = {
+  "destination": "Marrakech"
+}</pre></div><div class='case pass'><h3>negation-01 <span class='tag'>negation</span> <span class='small'>F1=1.00 · ⏱ 1886ms</span></h3><div class='msg'>« Marrakech 5 jours 1200€, surtout pas de shopping »</div><pre>extracted = {
+  "destination": "Marrakech",
+  "num_days": 5,
+  "total_budget": 1200,
+  "avoided_categories": [
+    "shopping"
+  ]
+}</pre></div><div class='case pass'><h3>negation-02 <span class='tag'>negation</span> <span class='small'>F1=1.00 · ⏱ 2699ms</span></h3><div class='msg'>« Tokyo 4 jours 3000€, on déteste la nightlife et le shopping »</div><pre>extracted = {
+  "destination": "Tokyo",
+  "num_days": 4,
+  "total_budget": 3000,
+  "avoided_categories": [
+    "nightlife",
+    "shopping"
+  ]
+}</pre></div><div class='case pass'><h3>conditional-01 <span class='tag'>conditional</span> <span class='small'>F1=1.00 · ⏱ -1217ms</span></h3><div class='msg'>« Paris 4 jours 2000€, je veux faire le Louvre le jour 2 »</div><pre>extracted = {
+  "destination": "Paris",
+  "num_days": 4,
+  "total_budget": 2000,
+  "must_visit": [
+    "louvre"
+  ],
+  "must_visit_on_day": {
+    "louvre": 2
+  }
+}</pre></div><div class='case pass'><h3>conditional-02 <span class='tag'>conditional</span> <span class='small'>F1=1.00 · ⏱ 1973ms</span></h3><div class='msg'>« Rome 5 jours 1500€, je veux absolument voir le Colisée et le Vatican »</div><pre>extracted = {
+  "destination": "Rome",
+  "num_days": 5,
+  "total_budget": 1500,
+  "must_visit": [
+    "colosseum",
+    "vatican"
+  ]
+}</pre></div><div class='case pass'><h3>implicit-01 <span class='tag'>implicit</span> <span class='small'>F1=1.00 · ⏱ 2128ms</span></h3><div class='msg'>« Lisbonne 5 jours 1500€, on est fatigués donc rythme tranquille »</div><pre>extracted = {
+  "destination": "Lisbonne",
+  "num_days": 5,
+  "total_budget": 1500,
+  "preferred_pace": "relaxed"
+}</pre></div><div class='case pass'><h3>implicit-02 <span class='tag'>implicit</span> <span class='small'>F1=1.00 · ⏱ 1649ms</span></h3><div class='msg'>« Berlin 3 jours 1200€, on veut tout voir, à fond ! »</div><pre>extracted = {
+  "destination": "Berlin",
+  "num_days": 3,
+  "total_budget": 1200,
+  "preferred_pace": "intense"
+}</pre></div><div class='case pass'><h3>transport-01 <span class='tag'>preference</span> <span class='small'>F1=1.00 · ⏱ 1623ms</span></h3><div class='msg'>« Amsterdam 4 jours 1500€, à vélo svp »</div><pre>extracted = {
+  "destination": "Amsterdam",
+  "num_days": 4,
+  "total_budget": 1500,
+  "transport_mode": "bike"
+}</pre></div><div class='case pass'><h3>transport-02 <span class='tag'>preference</span> <span class='small'>F1=1.00 · ⏱ 2832ms</span></h3><div class='msg'>« Los Angeles 5 jours 3000€, on va louer une voiture »</div><pre>extracted = {
+  "destination": "Los Angeles",
+  "num_days": 5,
+  "total_budget": 3000,
+  "transport_mode": "car"
+}</pre></div><div class='case pass'><h3>hours-01 <span class='tag'>preference</span> <span class='small'>F1=1.00 · ⏱ 2059ms</span></h3><div class='msg'>« Vienne 3 jours 1200€, on commence à 10h et on finit à 22h »</div><pre>extracted = {
+  "destination": "Vienne",
+  "num_days": 3,
+  "total_budget": 1200,
+  "day_start_hour": 10,
+  "day_end_hour": 22
+}</pre></div><div class='case pass'><h3>minimal-01 <span class='tag'>minimal</span> <span class='small'>F1=1.00 · ⏱ 2762ms</span></h3><div class='msg'>« Rome »</div><pre>extracted = {
+  "destination": "Rome"
+}</pre></div><div class='case pass'><h3>empty-01 <span class='tag'>minimal</span> <span class='small'>F1=1.00 · ⏱ 1118ms</span></h3><div class='msg'>« Bonjour ! »</div><pre>extracted = {}</pre></div><div class='case pass'><h3>mixed-01 <span class='tag'>complex</span> <span class='small'>F1=1.00 · ⏱ 1660ms</span></h3><div class='msg'>« Tokyo 5 jours 2500€, on aime la culture et la gastro mais pas le shopping ni la nightlife »</div><pre>extracted = {
+  "destination": "Tokyo",
+  "num_days": 5,
+  "total_budget": 2500,
+  "preferred_categories": [
+    "culture",
+    "gastro"
+  ],
+  "avoided_categories": [
+    "shopping",
+    "nightlife"
+  ]
+}</pre></div><div class='case pass'><h3>complex-01 <span class='tag'>complex</span> <span class='small'>F1=1.00 · ⏱ 1924ms</span></h3><div class='msg'>« Barcelone, 6 jours, 3500€ pour 3 personnes, hôtel max 150€/nuit, on aime culture »</div><pre>extracted = {
+  "destination": "Barcelone",
+  "num_days": 6,
+  "total_budget": 3500,
+  "num_travelers": 3,
+  "hotel_per_night": 150,
+  "preferred_categories": [
+    "culture"
+  ]
+}</pre></div><div class='case pass'><h3>adversarial-01 <span class='tag'>adversarial</span> <span class='small'>F1=1.00 · ⏱ 1882ms</span></h3><div class='msg'>« Une dizaine de jours à Naples, je dirais 2k de budget, on ne refuse rien »</div><pre>extracted = {
+  "destination": "Naples",
+  "num_days": 10,
+  "total_budget": 2000
+}</pre></div><div class='case pass'><h3>adversarial-02 <span class='tag'>adversarial</span> <span class='small'>F1=1.00 · ⏱ 1419ms</span></h3><div class='msg'>« Florence du 3 au 8 mars, budget 1200 euros, ah et on est 2 »</div><pre>extracted = {
+  "destination": "Florence",
+  "num_days": 6,
+  "total_budget": 1200,
+  "num_travelers": 2
+}</pre></div><div class='case fail'><h3>adversarial-03 <span class='tag'>adversarial</span> <span class='small'>F1=0.80 · ⏱ 1557ms</span></h3><div class='msg'>« Athènes pendant deux semaines avec mille cinq cents euros »</div><ul><li><code>destination</code> : attendu <span class='match'>"Athènes"</span>, extrait <span class='miss'>"Athens"</span></li></ul><pre>extracted = {
+  "destination": "Athens",
+  "num_days": 14,
+  "total_budget": 1500
+}</pre></div><div class='case pass'><h3>adversarial-04 <span class='tag'>adversarial</span> <span class='small'>F1=1.00 · ⏱ 2270ms</span></h3><div class='msg'>« Bon en fait on annule le shopping et on ajoute plus de gastro à Tokyo »</div><pre>extracted = {
+  "destination": "Tokyo",
+  "preferred_categories": [
+    "gastro"
+  ],
+  "avoided_categories": [
+    "shopping"
+  ]
+}</pre></div><div class='case fail'><h3>adversarial-05 <span class='tag'>adversarial</span> <span class='small'>F1=0.86 · ⏱ 1348ms</span></h3><div class='msg'>« Séoul 5 jours 2500€, surtout pas trop tôt le matin, on dormira »</div><ul><li><code>day_start_hour</code> : attendu <span class='match'>11</span>, extrait <span class='miss'>null</span></li></ul><pre>extracted = {
+  "destination": "Séoul",
+  "num_days": 5,
+  "total_budget": 2500
+}</pre></div></body></html>
