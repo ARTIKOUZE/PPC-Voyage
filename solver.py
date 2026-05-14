@@ -204,11 +204,20 @@ class TravelPlannerSolver:
         travel_matrix: Optional[list[list[int]]] = None,
         mode: str = "flexible",
         transport_mode: str = "foot",
+        previous_plan: Optional[dict[int, list]] = None,
+        touched_days: Optional[set[int]] = None,
     ):
         self.activities = {a.id: a for a in activities}
         self.constraints = constraints
         self.mode = mode  # "flexible" | "strict"
         self._transport_mode = transport_mode  # "foot", "bike", "car"
+        # Plan précédent. Format accepté :
+        #   {day_idx_0based: [activity_id, ...]}              (legacy, bonus seul)
+        #   {day_idx_0based: [(activity_id, start_slot), ...]} (pin strict + bonus)
+        self._previous_plan = previous_plan or {}
+        # Jours explicitement modifiés ce tour-ci. None = pas de pinning
+        # (premier tour, ou changement structurel). set() vide = tous les jours pinned.
+        self._touched_days = touched_days
         self.model = cp_model.CpModel()
 
         # Index activity_id -> position dans travel_matrix
@@ -239,6 +248,8 @@ class TravelPlannerSolver:
         self._add_soft_preferences()             # Type 5
         self._add_cardinality_constraints()      # Type 6
         self._add_travel_penalty()               # Optimisation : minimiser temps de trajet
+        self._add_pin_constraints()              # Multi-tours : pin hard des jours non touchés
+        self._add_stability_bonus()              # Multi-tours : bonus soft pour le reste
         self._set_objective()
 
     def _create_variables(self):
@@ -310,7 +321,9 @@ class TravelPlannerSolver:
         # Soft : pénaliser une trop grosse sous-utilisation du budget activités.
         # Cible : dépenser au moins 70 % du budget activités s'il dépasse 100 €.
         # On évite de pénaliser quand le budget est très serré (≤ 100 €).
-        if activity_budget > 100:
+        # On n'applique PAS cette pénalité en pace=relaxed : l'utilisateur veut
+        # peu d'activités, le forcer à utiliser le budget contredirait le pace.
+        if activity_budget > 100 and C.preferred_pace != "relaxed":
             target_spend = (activity_budget * 7) // 10
             underspend = self.model.new_int_var(
                 0, activity_budget, "activity_underspend"
@@ -606,11 +619,20 @@ class TravelPlannerSolver:
 
             self.soft_bonuses.append(self.selected[a_id] * score)
 
-        # Préférence de rythme : pénalité asymétrique forte si sous le rythme,
-        # aucune pénalité si on dépasse (le but est de remplir la journée).
-        # Cibles bumpées : "moderate" = 4 activités, etc.
-        pace_map = {"relaxed": 3, "moderate": 4, "intense": 5}
-        target = pace_map.get(C.preferred_pace, 4)
+        # Préférence de rythme : pénalités asymétriques distinctes par rythme.
+        # C'est ce qui différencie réellement relaxed / moderate / intense :
+        #   - relaxed : pénalité forte sur l'overflow (n'en mets pas trop)
+        #   - intense : pénalité forte sur le shortfall (remplis bien la journée)
+        # Sans cette asymétrie les trois rythmes convergent vers le maximum
+        # naturel autorisé par les durées + le budget.
+        PACE_CONFIG = {
+            "relaxed":  {"target": 3, "short_w": 4,  "over_w": 10},
+            "moderate": {"target": 4, "short_w": 8,  "over_w": 4},
+            "intense":  {"target": 5, "short_w": 12, "over_w": 1},
+        }
+        pace = C.preferred_pace if C.preferred_pace in PACE_CONFIG else "moderate"
+        cfg = PACE_CONFIG[pace]
+        target = cfg["target"]
 
         for d in range(C.num_days):
             day_count = sum(
@@ -618,13 +640,19 @@ class TravelPlannerSolver:
                 for a_id in self.activities
                 if (a_id, d) in self.assign
             )
-            # shortfall = max(0, target - day_count) : pénalise le manque d'activités
+            # shortfall = max(0, target - day_count)
             shortfall = self.model.new_int_var(0, target, f"shortfall_d{d}")
             self.model.add(shortfall >= target - day_count)
             self.model.add(shortfall >= 0)
-            self.soft_penalties.append(shortfall * 12)
-            # Pas de pénalité d'overflow : on préfère remplir une journée si
-            # le solveur trouve la place et le budget pour des activités en plus.
+            self.soft_penalties.append(shortfall * cfg["short_w"])
+
+            # overflow = max(0, day_count - target)
+            max_over = max(0, C.max_activities_per_day - target)
+            if cfg["over_w"] > 0 and max_over > 0:
+                overflow = self.model.new_int_var(0, max_over, f"overflow_d{d}")
+                self.model.add(overflow >= day_count - target)
+                self.model.add(overflow >= 0)
+                self.soft_penalties.append(overflow * cfg["over_w"])
 
         # Préférence matin : culture le matin
         if C.morning_preference:
@@ -704,6 +732,68 @@ class TravelPlannerSolver:
             if weight > 0:
                 self.soft_penalties.append(both_assigned * weight)
 
+    # ── Bonus de stabilité + pinning multi-tours ──────────────
+
+    @staticmethod
+    def _iter_prev_plan(entries):
+        """Itère sur le plan précédent (format legacy ou tuple)."""
+        for entry in entries:
+            if isinstance(entry, (list, tuple)):
+                yield entry[0], entry[1]   # (act_id, start_slot)
+            else:
+                yield entry, None          # legacy : act_id seul
+
+    def _add_stability_bonus(self):
+        """
+        Bonus SOFT pour conservation du plan précédent. Utile pour les jours
+        explicitement touchés par l'utilisateur : on préfère bouger le moins
+        possible parmi les options compatibles avec sa demande.
+        """
+        if not self._previous_plan:
+            return
+        STABILITY_WEIGHT = 4
+        for day_idx, entries in self._previous_plan.items():
+            for act_id, _slot in self._iter_prev_plan(entries):
+                if (act_id, day_idx) in self.assign:
+                    self.soft_bonuses.append(
+                        self.assign[act_id, day_idx] * STABILITY_WEIGHT
+                    )
+
+    def _add_pin_constraints(self):
+        """
+        Pinning HARD des jours non touchés par l'utilisateur ce tour-ci.
+        Garantit que les jours non mentionnés sont identiques au tour précédent
+        (mêmes activités sur les mêmes créneaux). Évite le reshuffle pour des
+        gains marginaux d'objectif.
+
+        - self._touched_days = None  → pas de pinning (premier tour ou
+          changement structurel comme budget/durée/rythme/catégories).
+        - self._touched_days = set() → tous les jours pinned (aucune modif
+          mentionnée, utilisateur a juste discuté).
+        - self._touched_days = {2, 4} → jours 2 et 4 libres, les autres pinned.
+        """
+        if self._touched_days is None or not self._previous_plan:
+            return
+
+        for day_idx, entries in self._previous_plan.items():
+            if day_idx in self._touched_days:
+                continue  # jour explicitement modifié → laisser libre
+            pinned_ids: set[str] = set()
+            for act_id, slot in self._iter_prev_plan(entries):
+                if (act_id, day_idx) in self.assign:
+                    # Activité forcée sur ce jour
+                    self.model.add(self.assign[act_id, day_idx] == 1)
+                    # Créneau de début forcé si on l'a
+                    if slot is not None and (act_id, day_idx) in self.start:
+                        self.model.add(self.start[act_id, day_idx] == int(slot))
+                    pinned_ids.add(act_id)
+            # Interdire toute autre activité sur ce jour pinned
+            for a_id in self.activities:
+                if a_id in pinned_ids:
+                    continue
+                if (a_id, day_idx) in self.assign:
+                    self.model.add(self.assign[a_id, day_idx] == 0)
+
     # ── Objectif ────────────────────────────────────
 
     def _set_objective(self):
@@ -757,6 +847,7 @@ class TravelPlannerSolver:
                         "zone": act.zone,
                         "start_time": f"{int(start_hour):02d}:{int((start_hour % 1) * 60):02d}",
                         "end_time": f"{int(end_hour):02d}:{int((end_hour % 1) * 60):02d}",
+                        "start_slot": int(start_slot),  # pour pinning multi-tours
                         "duration_hours": act.duration_hours,
                         "cost": act.cost_euros * C.num_travelers,
                     })
@@ -951,6 +1042,8 @@ def solve_with_city_data(
     city_data: dict,
     time_limit_seconds: int = 10,
     mode: str = "flexible",
+    previous_plan: Optional[dict[int, list]] = None,
+    touched_days: Optional[set[int]] = None,
 ) -> dict:
     """
     Entrypoint principal. Consomme la sortie de data_provider.build_city_data().
@@ -1017,8 +1110,20 @@ def solve_with_city_data(
     planner = TravelPlannerSolver(
         activities, constraints,
         travel_matrix=travel_matrix, mode=mode, transport_mode=transport_mode,
+        previous_plan=previous_plan, touched_days=touched_days,
     )
     result = planner.solve(time_limit_seconds=time_limit_seconds)
+
+    # Si le pinning rend le problème infaisable, on retente sans pin
+    # (fallback : on relâche le pinning pour permettre la modif demandée).
+    if result.get("status") == "INFEASIBLE" and touched_days is not None:
+        planner_unpinned = TravelPlannerSolver(
+            activities, constraints,
+            travel_matrix=travel_matrix, mode=mode, transport_mode=transport_mode,
+            previous_plan=previous_plan, touched_days=None,
+        )
+        result = planner_unpinned.solve(time_limit_seconds=time_limit_seconds)
+        result["pin_fallback"] = True
 
     # En mode strict, si INFEASIBLE, retenter en mode flexible
     if result.get("status") == "INFEASIBLE" and mode == "strict":
@@ -1029,6 +1134,7 @@ def solve_with_city_data(
         planner_flex = TravelPlannerSolver(
             activities, constraints,
             travel_matrix=travel_matrix, mode="flexible", transport_mode=transport_mode,
+            previous_plan=previous_plan,
         )
         result = planner_flex.solve(time_limit_seconds=time_limit_seconds)
         result["mode_fallback"] = "strict→flexible"

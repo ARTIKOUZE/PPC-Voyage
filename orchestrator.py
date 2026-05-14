@@ -98,6 +98,72 @@ ARRAY_FIELDS = {
     "must_visit", "must_avoid",
 }
 
+# Champs dont la modification affecte tous les jours → pas de pinning.
+_STRUCTURAL_FIELDS = {
+    "num_days", "total_budget", "preferred_pace",
+    "preferred_categories", "avoided_categories",
+    "day_start_hour", "day_end_hour",
+    "max_activities_per_day", "min_activities_per_day",
+    "hotel_per_night", "daily_food_budget", "num_travelers",
+    "transport_mode", "morning_preference", "destination",
+}
+
+
+def _determine_touched_days(extracted: dict, previous_plan: dict) -> Optional[set]:
+    """
+    Décide quels jours (0-indexed) l'utilisateur a explicitement modifiés
+    ce tour-ci. Les autres jours seront hard-pinned dans le solveur.
+
+    Returns:
+      - None : pas de pinning (changement structurel, premier tour, ou
+        ajout d'activité sans jour précisé — le solveur doit pouvoir
+        choisir librement où la placer).
+      - set() : aucun jour touché → tout est pinned (l'utilisateur a juste
+        discuté sans modifier de contraintes).
+      - set(...): jours touchés ; les autres sont pinned.
+    """
+    if not previous_plan:
+        return None
+
+    # Changement structurel : impossible d'isoler localement
+    if _STRUCTURAL_FIELDS & set(extracted.keys()):
+        return None
+
+    touched: set[int] = set()
+
+    # must_visit_on_day : jour ciblé + jour où l'activité était avant
+    for act_id, day_1based in (extracted.get("must_visit_on_day") or {}).items():
+        try:
+            touched.add(int(day_1based) - 1)
+        except (TypeError, ValueError):
+            continue
+        for d, entries in previous_plan.items():
+            for entry in entries:
+                aid = entry[0] if isinstance(entry, (list, tuple)) else entry
+                if aid == act_id:
+                    touched.add(d)
+
+    # must_avoid : jour où l'activité était
+    for act_id in (extracted.get("must_avoid") or []):
+        for d, entries in previous_plan.items():
+            for entry in entries:
+                aid = entry[0] if isinstance(entry, (list, tuple)) else entry
+                if aid == act_id:
+                    touched.add(d)
+
+    # must_visit ajouté sans précision de jour : le solveur doit pouvoir
+    # placer la nouvelle activité n'importe où → pas de pinning
+    existing = set()
+    for entries in previous_plan.values():
+        for entry in entries:
+            aid = entry[0] if isinstance(entry, (list, tuple)) else entry
+            existing.add(aid)
+    for act_id in (extracted.get("must_visit") or []):
+        if act_id not in existing:
+            return None
+
+    return touched
+
 # Champs dictionnaire : les clés sont unionnées (la nouvelle valeur écrase l'ancienne)
 DICT_FIELDS = {
     "must_visit_on_day",
@@ -285,10 +351,33 @@ def handle_turn(
             "llm_unreachable": True,
         }
 
-    # 5. CP-SAT
+    # 5. CP-SAT — multi-tours : pin hard des jours non touchés + bonus stabilité.
+    prev_meta = _store.get_meta(session_id)
+    previous_plan = None
+    touched_days = None
+    if (prev_meta.get("last_destination") == destination
+            and prev_meta.get("last_plan")):
+        previous_plan = prev_meta["last_plan"]
+        touched_days = _determine_touched_days(extracted, previous_plan)
+
     plan = solve_with_city_data(
-        merged, city_data, time_limit_seconds=solve_timeout, mode=mode
+        merged, city_data, time_limit_seconds=solve_timeout, mode=mode,
+        previous_plan=previous_plan, touched_days=touched_days,
     )
+
+    # Sauvegarder le plan pour le prochain tour (avec start_slot pour pin précis)
+    if plan and plan.get("status") in ("OPTIMAL", "FEASIBLE"):
+        last_plan_map = {
+            d["day"] - 1: [
+                (a["id"], a.get("start_slot", 0))
+                for a in d.get("activities", [])
+            ]
+            for d in plan.get("days", [])
+        }
+        new_meta = _store.get_meta(session_id)
+        new_meta["last_plan"] = last_plan_map
+        new_meta["last_destination"] = destination
+        _store.set_meta(session_id, new_meta)
 
     # 6. Explication des compromis
     explanation = explain_solution(plan, merged)
@@ -387,9 +476,34 @@ def handle_form(
             "llm_unreachable": True,
         }
 
+    prev_meta = _store.get_meta(session_id)
+    previous_plan = None
+    touched_days = None
+    if (prev_meta.get("last_destination") == destination
+            and prev_meta.get("last_plan")):
+        previous_plan = prev_meta["last_plan"]
+        # Le formulaire ne supporte pas les contraintes activity-level
+        # (must_visit_on_day, etc.) — donc structural toujours. Pas de pin.
+        touched_days = _determine_touched_days(form_constraints, previous_plan)
+
     plan = solve_with_city_data(
-        merged, city_data, time_limit_seconds=solve_timeout, mode=mode
+        merged, city_data, time_limit_seconds=solve_timeout, mode=mode,
+        previous_plan=previous_plan, touched_days=touched_days,
     )
+
+    if plan and plan.get("status") in ("OPTIMAL", "FEASIBLE"):
+        last_plan_map = {
+            d["day"] - 1: [
+                (a["id"], a.get("start_slot", 0))
+                for a in d.get("activities", [])
+            ]
+            for d in plan.get("days", [])
+        }
+        new_meta = _store.get_meta(session_id)
+        new_meta["last_plan"] = last_plan_map
+        new_meta["last_destination"] = destination
+        _store.set_meta(session_id, new_meta)
+
     explanation = explain_solution(plan, merged)
 
     # En mode formulaire on génère une narration courte déterministe (pas de LLM
