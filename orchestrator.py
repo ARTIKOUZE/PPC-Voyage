@@ -175,6 +175,49 @@ INCOMPATIBLE_PAIRS = [
 ]
 
 
+def _strip_default_reemissions(extracted: dict, current: dict) -> dict:
+    """
+    Filtre défensif contre les ré-émissions parasites du LLM.
+
+    Problème : quand l'utilisateur fait une édition activity-level (ex:
+    "déplace le Louvre au jour 2"), le LLM peut accidentellement ré-émettre
+    un champ scalaire avec sa valeur par défaut (ex: num_travelers=1) au
+    lieu de l'omettre. Ça écrase la valeur courante de l'utilisateur (qui
+    pouvait être 3 voyageurs).
+
+    Stratégie sûre : on ne supprime QUE quand
+      (a) le message contient une modif activity-level (must_visit*, must_avoid),
+          signe que c'est une édition pas un changement scalaire,
+      (b) ET le champ extrait a une valeur "default suspecte",
+      (c) ET la valeur courante de ce champ diffère du défaut.
+
+    Sous ces 3 conditions, c'est presque certainement une ré-émission parasite.
+    Si l'utilisateur dit "on est 1 maintenant" sans édition d'activité,
+    la condition (a) n'est pas remplie → la valeur est préservée.
+    """
+    activity_level_keys = {"must_visit", "must_visit_on_day", "must_avoid"}
+    is_activity_edit = bool(activity_level_keys & set(extracted.keys()))
+    if not is_activity_edit:
+        return extracted
+
+    suspect_defaults = {
+        "num_travelers": 1,
+        "hotel_per_night": 100,
+        "daily_food_budget": 60,
+        "min_activities_per_day": 1,
+        "max_activities_per_day": 6,
+    }
+    cleaned = dict(extracted)
+    for field, suspect_val in suspect_defaults.items():
+        if field not in cleaned:
+            continue
+        extracted_val = cleaned[field]
+        current_val = current.get(field)
+        if extracted_val == suspect_val and current_val not in (None, suspect_val):
+            del cleaned[field]
+    return cleaned
+
+
 def merge_constraints(current: dict, update: dict) -> dict:
     """
     Fusionne les contraintes.
@@ -256,6 +299,8 @@ def handle_turn(
         user_message, current, pending_field=pending_field
     )
     extraction_ms = int((time.time() - t_ex) * 1000)
+    # Filtrer les ré-émissions parasites du LLM (ex: num_travelers=1 ré-écrasé)
+    extracted = _strip_default_reemissions(extracted, current)
     if extract_err:
         errors.append(f"llm_extract: {extract_err}")
 

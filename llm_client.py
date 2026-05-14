@@ -257,6 +257,32 @@ User: "Can you add the Eiffel Tower on day 1?"
 
 User: "Inclure Notre-Dame le jour 2 et le Louvre le jour 4"
 → {"must_visit":["notre-dame","louvre"],"must_visit_on_day":{"notre-dame":2,"louvre":4}}
+
+RELATIVE REQUESTS — interpret in context of "Contraintes actuelles":
+
+User (current preferred_pace=moderate): "Je veux plus d'activités par jour"
+→ {"preferred_pace":"intense"}
+
+User (current preferred_pace=relaxed): "Plus d'activités svp"
+→ {"preferred_pace":"moderate"}
+
+User (current preferred_pace=intense): "On en a trop, moins d'activités"
+→ {"preferred_pace":"moderate"}
+
+User (current preferred_pace=moderate): "Moins d'activités, on veut prendre notre temps"
+→ {"preferred_pace":"relaxed"}
+
+User (current preferred_pace=intense): "Encore plus d'activités si possible"
+→ {"min_activities_per_day":6}
+
+CRITICAL — do not re-emit fields that are NOT mentioned in the user's message,
+even if "Contraintes actuelles" shows a value for them. Re-emitting unchanged
+fields corrupts the multi-turn merge. Example:
+
+User (current num_travelers=3, num_days=5, total_budget=2500): "Déplace le Louvre au jour 2"
+→ {"must_visit":["louvre"],"must_visit_on_day":{"louvre":2}}
+(Notice: num_travelers, num_days, total_budget are NOT re-emitted because the
+user didn't mention them.)
 """
 
 
