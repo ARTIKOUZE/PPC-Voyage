@@ -67,6 +67,9 @@ class LLMActivity(BaseModel):
     longitude: float = Field(ge=-180.0, le=180.0)
     priority_score: int = Field(ge=1, le=10)
     confidence: float = Field(ge=0.0, le=1.0, default=0.85)
+    nearest_metro_station: str = ""
+    transit_lines: list[str] = Field(default_factory=list)
+    transit_exit: str = ""
 
     def clean_category(self) -> str:
         return self.category if self.category in VALID_CATEGORIES else "culture"
@@ -100,7 +103,7 @@ Return ONLY a valid JSON object. No markdown, no explanations.
 Structure:
 {{
   "city": {{"name":"...","country":"<2-letter ISO>","latitude":<lat>,"longitude":<lon>,"population":<int>}},
-  "activities": [ {{"id":"slug","name":"<French>","category":"<culture|gastro|nature|shopping|nightlife>","duration_hours":<float>,"cost_euros":<int>,"opening_hour":<int>,"closing_hour":<int>,"latitude":<lat>,"longitude":<lon>,"priority_score":<1-10>,"confidence":<0.80-0.95>}}, ... ],
+  "activities": [ {{"id":"slug","name":"<French>","category":"<culture|gastro|nature|shopping|nightlife>","duration_hours":<float>,"cost_euros":<int>,"opening_hour":<int>,"closing_hour":<int>,"latitude":<lat>,"longitude":<lon>,"priority_score":<1-10>,"confidence":<0.80-0.95>,"nearest_metro_station":"<official station name, or empty string>","transit_lines":["<line number/name>"],"transit_exit":"<exit name or empty>"}}, ... ],
   "hotels": [ {{"name":"<real hotel>","address":"<full address>","price_per_night":<int>,"stars":<1-5>,"latitude":<lat>,"longitude":<lon>,"description":"<French, <12 words>"}}, ... ]
 }}
 
@@ -133,6 +136,9 @@ REALISTIC opening_hour / closing_hour (use real opening hours, not 8-22 by defau
 - Outdoor monuments (Eiffel base, Trevi): open 0, close 24 (always accessible)
 
 - Exactly 3 REAL hotels in the city: 1 budget (50-90€, 2-3★), 1 mid-range (100-180€, 3-4★), 1 premium (200-400€, 4-5★). Real names + addresses.
+- nearest_metro_station: official name of closest metro/subway/tram/RER stop. Empty string if none.
+- transit_lines: list of line numbers/names at that station (e.g. ["1","7"] for Paris Louvre, ["6","9"] for Trocadéro). Empty list if no metro nearby.
+- transit_exit: specific exit if notable (e.g. "Sortie Tour Eiffel"), else empty string.
 - Be CONCISE: no extra fields, no commentary. Output the JSON and stop.
 """
 
@@ -228,6 +234,9 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
                     "priority_score": act.priority_score,
                     "zone": "",
                     "confidence": act.confidence,
+                    "nearest_metro_station": act.nearest_metro_station or "",
+                    "transit_lines": list(act.transit_lines) if act.transit_lines else [],
+                    "transit_exit": act.transit_exit or "",
                     "data_source_detail": "llm",
                 })
             except (ValidationError, TypeError) as e:
@@ -339,6 +348,60 @@ def _compute_travel_matrix(
 # Point d'entrée public
 # ─────────────────────────────────────────────────────────────────────────────
 
+_ENRICHMENT_FIELDS = (
+    "opening_hours", "flexible_hours", "closed_days",
+    "price_info", "student_discount", "student_cost_euros",
+    "last_entry_before_close_minutes",
+    "nearest_metro_station", "transit_lines", "transit_exit",
+    "opening_hour", "closing_hour", "cost_euros",
+    "data_confidence", "data_source",
+)
+
+
+def _apply_enrichment_cache(data: dict, city_name: str) -> bool:
+    """Merge le cache d'enrichissement activity_info dans city_data. Non-bloquant."""
+    try:
+        import re as _re
+        from activity_info_service import _load_cache as _ai_cache
+        city_key = _re.sub(r"[^\w]", "_", city_name.lower())
+        cached = _ai_cache(city_key)
+        if not cached:
+            return False
+        enriched_by_id = {k: v for k, v in cached.items() if not k.startswith("_")}
+        if not enriched_by_id:
+            return False
+        applied = 0
+        for act in data.get("activities", []):
+            e = enriched_by_id.get(act["id"])
+            if e:
+                for f in _ENRICHMENT_FIELDS:
+                    if f in e:
+                        act[f] = e[f]
+                applied += 1
+        if applied:
+            data["data_source"] = data.get("data_source", "llm+osrm") + "+enriched"
+            logger.info("[LLMCity] '%s' — %d activités enrichies depuis cache", city_name, applied)
+        return applied > 0
+    except Exception as e:
+        logger.debug("[LLMCity] _apply_enrichment_cache: %s", e)
+        return False
+
+
+def _enrich_in_background(activities: list, city_name: str, city_country: str) -> None:
+    """Lance l'enrichissement (horaires, prix, metro…) dans un thread daemon."""
+    import threading, copy
+
+    def _run():
+        try:
+            from activity_info_service import enrich_activities_batch
+            enrich_activities_batch(copy.deepcopy(activities), city_name, city_country)
+            logger.info("[LLMCity] Enrichissement background terminé pour '%s'", city_name)
+        except Exception as exc:
+            logger.warning("[LLMCity] Enrichissement background échoué pour '%s': %s", city_name, exc)
+
+    threading.Thread(target=_run, daemon=True, name=f"enrich-{city_name}").start()
+
+
 def generate_city_data(
     city_name: str,
     transport_mode: str = "foot",
@@ -350,17 +413,29 @@ def generate_city_data(
         {"city": {...}, "activities": [...], "travel_matrix": [[...]],
          "hotels": [...], "transport_mode": "foot", ...}
     ou None en cas d'échec.
+
+    L'enrichissement (horaires réels, prix, stations de métro…) tourne en background
+    et est appliqué dès le prochain appel via le cache activity_info.
     """
-    # Pour rester compatible avec les anciens caches : pas de suffixe pour "foot"
     base_key = f"llm_city_{city_name.lower().replace(' ', '_')}"
     cache_key = base_key if transport_mode == "foot" else f"{base_key}_{transport_mode}"
+    city_country = ""
 
-    # 1. Cache
+    # 1. Cache LLM ville
     if _CACHE_AVAILABLE and _cache:
         cached = _cache.get(cache_key)
         if cached:
             logger.info("[LLMCity] '%s' chargée depuis le cache (%d activités)",
                         city_name, len(cached.get("activities", [])))
+            city_country = cached.get("city", {}).get("country", "")
+            # Appliquer l'enrichissement depuis son propre cache si disponible
+            enriched = _apply_enrichment_cache(cached, city_name)
+            if enriched and _CACHE_AVAILABLE and _cache:
+                # Persister la version enrichie pour éviter de re-merger à chaque appel
+                _cache.set(cache_key, cached, ttl_hours=TTL_LLM_CITY)
+            elif not enriched:
+                # Pas encore de cache enrichissement → lancer en background
+                _enrich_in_background(cached.get("activities", []), city_name, city_country)
             return cached
 
     logger.info("[LLMCity] Génération LLM pour '%s'…", city_name)
@@ -377,6 +452,7 @@ def generate_city_data(
 
     city_lat = data["city"]["latitude"]
     city_lon = data["city"]["longitude"]
+    city_country = data["city"].get("country", "")
 
     # 4. Zones
     _assign_zones(data["activities"], city_lat, city_lon)
@@ -397,9 +473,12 @@ def generate_city_data(
         "total": len(data["activities"]),
     }
 
-    # 6. Mise en cache (30 jours)
+    # 6. Cache immédiat (sans enrichissement)
     if _CACHE_AVAILABLE and _cache:
         _cache.set(cache_key, data, ttl_hours=TTL_LLM_CITY)
         logger.info("[LLMCity] '%s' mise en cache (%d activités)", city_name, len(data["activities"]))
+
+    # 7. Enrichissement en background (station métro, horaires, prix)
+    _enrich_in_background(data["activities"], city_name, city_country)
 
     return data
