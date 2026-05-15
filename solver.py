@@ -36,10 +36,14 @@ class Activity:
     available_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
     latitude: float = 0.0
     longitude: float = 0.0
+    nearest_metro_station: str = ""
+    transit_lines: list = field(default_factory=list)
+    transit_exit: str = ""
 
 
 def dict_to_activity(d: dict) -> Activity:
     """Convertit un dict venant de data_provider.build_city_data() en Activity."""
+    lines = d.get("transit_lines") or []
     return Activity(
         id=d["id"],
         name=d["name"],
@@ -53,6 +57,9 @@ def dict_to_activity(d: dict) -> Activity:
         available_days=d.get("available_days", [0, 1, 2, 3, 4, 5, 6]),
         latitude=float(d.get("latitude", 0.0)),
         longitude=float(d.get("longitude", 0.0)),
+        nearest_metro_station=str(d.get("nearest_metro_station") or ""),
+        transit_lines=[str(l) for l in lines if l],
+        transit_exit=str(d.get("transit_exit") or ""),
     )
 
 
@@ -872,7 +879,7 @@ class TravelPlannerSolver:
                         dst.latitude, dst.longitude,
                     )
                 mode, minutes = self._choose_segment_mode(int(travel_min), dist_m)
-                transitions.append({
+                transition = {
                     "from_id": a1["id"],
                     "to_id": a2["id"],
                     "from_name": a1["name"],
@@ -880,7 +887,20 @@ class TravelPlannerSolver:
                     "minutes": minutes,
                     "distance_m": int(round(dist_m)) if dist_m is not None else None,
                     "mode": mode,
-                })
+                }
+                # Enrichir les transitions en transports en commun avec station + ligne
+                if mode == "transit":
+                    if src and src.nearest_metro_station:
+                        transition["from_station"] = src.nearest_metro_station
+                        transition["from_lines"] = src.transit_lines
+                        if src.transit_exit:
+                            transition["from_exit"] = src.transit_exit
+                    if dst and dst.nearest_metro_station:
+                        transition["to_station"] = dst.nearest_metro_station
+                        transition["to_lines"] = dst.transit_lines
+                        if dst.transit_exit:
+                            transition["to_exit"] = dst.transit_exit
+                transitions.append(transition)
 
             plan["days"].append({
                 "day": d + 1,
@@ -1156,12 +1176,24 @@ def solve_with_city_data(
         result["hotel"] = chosen
     if "days" in result:
         act_by_id = {a.id: a for a in activities}
+        src_dict_by_id = {a["id"]: a for a in city_data.get("activities", [])}
         for day in result["days"]:
             for act in day.get("activities", []):
                 src = act_by_id.get(act["id"])
                 if src:
                     act["latitude"] = src.latitude
                     act["longitude"] = src.longitude
+                # Propager les champs enrichis (horaires, prix, transit…)
+                src_dict = src_dict_by_id.get(act["id"], {})
+                for field_name in (
+                    "opening_hours", "flexible_hours", "closed_days",
+                    "price_info", "student_discount", "student_cost_euros",
+                    "last_entry_before_close_minutes",
+                    "nearest_metro_station", "transit_lines", "transit_exit",
+                    "data_confidence", "data_source",
+                ):
+                    if field_name in src_dict:
+                        act[field_name] = src_dict[field_name]
     return result
 
 

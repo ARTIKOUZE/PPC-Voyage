@@ -6,9 +6,9 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 const API_BASE = import.meta.env?.VITE_API_BASE || "http://127.0.0.1:8000";
 
-async function callChat(sessionId, message, transportMode) {
+async function callChat(sessionId, message) {
   const body = { session_id: sessionId, message };
-  if (transportMode) body.transport_mode = transportMode;
+
   const resp = await fetch(`${API_BASE}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -18,9 +18,9 @@ async function callChat(sessionId, message, transportMode) {
   return resp.json();
 }
 
-async function callPlanForm(sessionId, formConstraints, transportMode) {
+async function callPlanForm(sessionId, formConstraints) {
   const body = { session_id: sessionId, constraints: formConstraints };
-  if (transportMode) body.transport_mode = transportMode;
+
   const resp = await fetch(`${API_BASE}/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -91,25 +91,72 @@ function formatDistance(meters) {
   return `${(meters / 1000).toFixed(1)} km`;
 }
 
+function formatLines(lines) {
+  if (!lines || lines.length === 0) return null;
+  return lines.map(l => (
+    <span key={l} style={{
+      display: "inline-block", minWidth: 18, textAlign: "center",
+      background: "#2D6ADB", color: "#fff",
+      borderRadius: 4, padding: "0 4px", fontSize: 10, fontWeight: 700,
+      marginLeft: 2, lineHeight: "16px",
+    }}>{l}</span>
+  ));
+}
+
 function TransitionRow({ transition }) {
   if (!transition) return null;
   const t = TRANSPORT_LABELS[transition.mode] || TRANSPORT_LABELS.foot;
   const dist = formatDistance(transition.distance_m);
+  const isTransit = transition.mode === "transit";
+  const fromStation = transition.from_station;
+  const toStation = transition.to_station;
+  const fromLines = transition.from_lines;
+  const toLines = transition.to_lines;
+
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 10,
       padding: "4px 0 4px 60px", marginBottom: 2,
       fontSize: 11, color: "#8B6F4E",
       fontFamily: "'DM Mono', monospace",
     }}>
-      <span style={{ fontSize: 14 }}>{t.icon}</span>
-      <span style={{
-        flex: 1, height: 1,
-        background: "repeating-linear-gradient(to right, #C8B89C 0 4px, transparent 4px 8px)",
-      }} />
-      <span>{transition.minutes} min</span>
-      {dist && <span style={{ opacity: 0.7 }}>· {dist}</span>}
-      <span style={{ opacity: 0.7 }}>· {t.label}</span>
+      {/* Ligne principale : icône — durée — distance — mode */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 14 }}>{t.icon}</span>
+        <span style={{
+          flex: 1, height: 1,
+          background: "repeating-linear-gradient(to right, #C8B89C 0 4px, transparent 4px 8px)",
+        }} />
+        <span>{transition.minutes} min</span>
+        {dist && <span style={{ opacity: 0.7 }}>· {dist}</span>}
+        <span style={{ opacity: 0.7 }}>· {t.label}</span>
+      </div>
+
+      {/* Détail métro : station départ → station arrivée avec lignes */}
+      {isTransit && (fromStation || toStation) && (
+        <div style={{
+          marginTop: 3, marginLeft: 24,
+          display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4,
+          fontSize: 10, color: "#5A4232",
+        }}>
+          {fromStation && (
+            <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <span style={{ opacity: 0.6 }}>Départ</span>
+              <strong style={{ marginLeft: 2 }}>{fromStation}</strong>
+              {formatLines(fromLines)}
+            </span>
+          )}
+          {fromStation && toStation && (
+            <span style={{ opacity: 0.5, margin: "0 2px" }}>→</span>
+          )}
+          {toStation && (
+            <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <span style={{ opacity: 0.6 }}>Descendre à</span>
+              <strong style={{ marginLeft: 2 }}>{toStation}</strong>
+              {formatLines(toLines)}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -601,7 +648,6 @@ export default function TravelPlannerApp() {
   const [plan, setPlan] = useState(null);
   const [city, setCity] = useState(null);
   const [hotel, setHotel] = useState(null);
-  const [transportMode, setTransportMode] = useState(null); // null = laisser le LLM choisir
   const [dataSource, setDataSource] = useState("");
   const [activeDay, setActiveDay] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -641,14 +687,13 @@ export default function TravelPlannerApp() {
     setLoading(true);
 
     try {
-      const result = await callChat(sessionId, userMsg, transportMode);
+      const result = await callChat(sessionId, userMsg);
 
       setConstraints(result.constraints);
       if (result.plan) setPlan(result.plan);
       if (result.city) setCity(result.city);
       if (result.plan?.data_source) setDataSource(result.plan.data_source);
       if (result.plan?.hotel) setHotel(result.plan.hotel);
-      if (result.plan?.transport_mode) setTransportMode(result.plan.transport_mode);
       setActiveDay(0);
       setLastSourceStats({
         source: result.source || "chat",
@@ -670,7 +715,7 @@ export default function TravelPlannerApp() {
       }]);
     }
     setLoading(false);
-  }, [input, sessionId, loading, transportMode]);
+  }, [input, sessionId, loading]);
 
   const handleFormSubmit = useCallback(async () => {
     if (loading) return;
@@ -685,7 +730,7 @@ export default function TravelPlannerApp() {
       fieldsFilled++;
     }
     try {
-      const result = await callPlanForm(sessionId, constraintsToSend, transportMode);
+      const result = await callPlanForm(sessionId, constraintsToSend);
       setConstraints(result.constraints);
       if (result.plan) setPlan(result.plan);
       if (result.city) setCity(result.city);
@@ -716,7 +761,7 @@ export default function TravelPlannerApp() {
       }]);
     }
     setLoading(false);
-  }, [formState, sessionId, loading, transportMode]);
+  }, [formState, sessionId, loading]);
 
   const handleReset = useCallback(async () => {
     await callReset(sessionId);
@@ -725,7 +770,6 @@ export default function TravelPlannerApp() {
     setPlan(null);
     setCity(null);
     setHotel(null);
-    setTransportMode(null);
     setMessages([{
       role: "assistant",
       content: "Nouvelle session. Dis-moi ce que tu veux planifier !",
@@ -832,38 +876,6 @@ export default function TravelPlannerApp() {
           </div>
         )}
 
-        <div style={{
-          padding: "8px 16px 0",
-          display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap",
-          borderTop: "1px solid #E8E0D8",
-        }}>
-          <span style={{
-            fontSize: 11, color: "#8B6F4E",
-            fontFamily: "'DM Mono', monospace",
-          }}>Transport :</span>
-          {[
-            { key: null, icon: "✨", label: "Auto" },
-            { key: "foot", icon: "🚶", label: "À pied" },
-            { key: "bike", icon: "🚲", label: "Vélo" },
-            { key: "car", icon: "🚗", label: "Voiture" },
-          ].map(opt => {
-            const active = transportMode === opt.key;
-            return (
-              <button
-                key={String(opt.key)}
-                onClick={() => setTransportMode(opt.key)}
-                style={{
-                  padding: "4px 10px", borderRadius: 14, cursor: "pointer",
-                  background: active ? "#3C2415" : "#F5F0EB",
-                  color: active ? "#F5F0EB" : "#5C4033",
-                  border: `1px solid ${active ? "#3C2415" : "#E8E0D8"}`,
-                  fontSize: 11, fontFamily: "'DM Mono', monospace",
-                }}
-                title={opt.label}
-              >{opt.icon} {opt.label}</button>
-            );
-          })}
-        </div>
 
         <div style={{
           padding: "8px 16px 12px",
