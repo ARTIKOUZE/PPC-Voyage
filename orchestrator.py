@@ -50,6 +50,9 @@ DEFAULT_CONSTRAINTS = {
     "max_activities_per_day": 6,
     "min_activities_per_day": 1,
     "transport_mode": None,
+    # Dates de séjour (ISO YYYY-MM-DD) — critique pour vérifier les ouvertures
+    "start_date": None,
+    "end_date": None,
 }
 
 

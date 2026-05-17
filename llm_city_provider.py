@@ -22,7 +22,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from llm_client import (
-    chat_with_fallback, QWEN_NO_THINK, _strip_thinking, _extract_json_blob,
+    chat_with_fallback, QWEN_NO_THINK, _extract_json_blob,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,8 +67,9 @@ class LLMActivity(BaseModel):
     longitude: float = Field(ge=-180.0, le=180.0)
     priority_score: int = Field(ge=1, le=10)
     confidence: float = Field(ge=0.0, le=1.0, default=0.85)
-    nearest_metro_station: str = ""
-    transit_lines: list[str] = Field(default_factory=list)
+    address: str = ""
+    nearest_stop: str = ""          # nom de l'arrêt le plus proche
+    transit_options: list = Field(default_factory=list)  # [{type, line}, ...]
     transit_exit: str = ""
 
     def clean_category(self) -> str:
@@ -103,13 +104,13 @@ Return ONLY a valid JSON object. No markdown, no explanations.
 Structure:
 {{
   "city": {{"name":"...","country":"<2-letter ISO>","latitude":<lat>,"longitude":<lon>,"population":<int>}},
-  "activities": [ {{"id":"slug","name":"<French>","category":"<culture|gastro|nature|shopping|nightlife>","duration_hours":<float>,"cost_euros":<int>,"opening_hour":<int>,"closing_hour":<int>,"latitude":<lat>,"longitude":<lon>,"priority_score":<1-10>,"confidence":<0.80-0.95>,"nearest_metro_station":"<official station name, or empty string>","transit_lines":["<line number/name>"],"transit_exit":"<exit name or empty>"}}, ... ],
+  "activities": [ {{"id":"slug","name":"<French>","category":"<culture|gastro|nature|shopping|nightlife>","duration_hours":<float>,"cost_euros":<int>,"opening_hour":<int>,"closing_hour":<int>,"latitude":<lat>,"longitude":<lon>,"priority_score":<1-10>,"confidence":<0.80-0.95>,"address":"<exact street address>","nearest_stop":"<official stop name>","transit_options":[{{"type":"<metro|bus|tram|rer|train|funiculaire>","line":"<number or letter>"}}],"transit_exit":"<exit name or empty>"}}, ... ],
   "hotels": [ {{"name":"<real hotel>","address":"<full address>","price_per_night":<int>,"stars":<1-5>,"latitude":<lat>,"longitude":<lon>,"description":"<French, <12 words>"}}, ... ]
 }}
 
 RULES:
-- Exactly 15 activities, diverse across the 5 categories.
-- Mix: 5 iconic (priority 9-10), 3 gastro, 2-3 nature, 1-2 shopping/nightlife if relevant.
+- Exactly 12 activities, diverse across the 5 categories.
+- Mix: 4-5 iconic culture (priority 9-10), 2-3 gastro, 2 nature, 1-2 shopping/nightlife if relevant.
 - Activity names in French. id = unique ASCII slug. GPS 4+ decimals. Prices in euros.
 
 REALISTIC duration_hours (use these typical visit times from real tourist averages):
@@ -135,10 +136,16 @@ REALISTIC opening_hour / closing_hour (use real opening hours, not 8-22 by defau
 - Markets: open 6-9, close 14-16
 - Outdoor monuments (Eiffel base, Trevi): open 0, close 24 (always accessible)
 
-- Exactly 3 REAL hotels in the city: 1 budget (50-90€, 2-3★), 1 mid-range (100-180€, 3-4★), 1 premium (200-400€, 4-5★). Real names + addresses.
-- nearest_metro_station: official name of closest metro/subway/tram/RER stop. Empty string if none.
-- transit_lines: list of line numbers/names at that station (e.g. ["1","7"] for Paris Louvre, ["6","9"] for Trocadéro). Empty list if no metro nearby.
-- transit_exit: specific exit if notable (e.g. "Sortie Tour Eiffel"), else empty string.
+- Exactly 3 REAL hotels in the city, covering 3 price tiers. Use ACTUAL booking prices (what Booking.com / Hotels.com shows today):
+  * Budget hotel (2-3★): real price typically 60-130€/night for major European cities
+  * Mid-range hotel (3-4★): real price typically 140-280€/night
+  * Premium hotel (4-5★): real price typically 290-600€/night
+  CRITICAL: Do NOT include ultra-luxury palaces (Ritz, Plaza Athénée, George V, Four Seasons, etc.) — their real price is 1000-5000€/night and would bust any normal budget. Use good 4-5★ hotels at realistic prices instead.
+  CRITICAL: price_per_night must reflect the actual nightly rate for 1 room, not total stay cost.
+- address: FULL address with street number (e.g. "5 Avenue Anatole France, 75007 Paris" or "99 Rue de Rivoli, 75001 Paris"). MANDATORY street number. Never just a street name without number.
+- nearest_stop: official name of the nearest public transport stop (any mode: metro, bus, tram, RER, train, funiculaire). Empty string if truly none.
+- transit_options: ALL transport options at nearest_stop. Each entry: {{"type": "<metro|bus|tram|rer|train|funiculaire>", "line": "<number or letter>"}}. Examples: [{{"type":"metro","line":"6"}},{{"type":"metro","line":"9"}}] for Trocadéro. Empty list only if no public transport within 800m.
+- transit_exit: specific exit/direction if helpful (e.g. "Sortie Tour Eiffel"), else empty string.
 - Be CONCISE: no extra fields, no commentary. Output the JSON and stop.
 """
 
@@ -157,12 +164,12 @@ def _call_llm_for_city(city_name: str, max_retries: int = 1) -> Optional[dict]:
     for attempt in range(max_retries + 1):
         try:
             resp = chat_with_fallback(
-                timeout=180.0,
+                timeout=240.0,
                 messages=[
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=3500,
+                max_tokens=6000,
                 response_format={"type": "json_object"},
                 extra_body=QWEN_NO_THINK,
             )
@@ -234,8 +241,13 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
                     "priority_score": act.priority_score,
                     "zone": "",
                     "confidence": act.confidence,
-                    "nearest_metro_station": act.nearest_metro_station or "",
-                    "transit_lines": list(act.transit_lines) if act.transit_lines else [],
+                    "address": act.address or "",
+                    "nearest_stop": act.nearest_stop or "",
+                    "transit_options": [
+                        {"type": str(o.get("type","")).lower(), "line": str(o.get("line",""))}
+                        for o in (act.transit_options or [])
+                        if isinstance(o, dict) and o.get("type")
+                    ],
                     "transit_exit": act.transit_exit or "",
                     "data_source_detail": "llm",
                 })
@@ -352,7 +364,7 @@ _ENRICHMENT_FIELDS = (
     "opening_hours", "flexible_hours", "closed_days",
     "price_info", "student_discount", "student_cost_euros",
     "last_entry_before_close_minutes",
-    "nearest_metro_station", "transit_lines", "transit_exit",
+    "address", "nearest_stop", "transit_options", "transit_exit",
     "opening_hour", "closing_hour", "cost_euros",
     "data_confidence", "data_source",
 )

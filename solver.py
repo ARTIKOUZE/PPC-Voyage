@@ -36,14 +36,16 @@ class Activity:
     available_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
     latitude: float = 0.0
     longitude: float = 0.0
-    nearest_metro_station: str = ""
-    transit_lines: list = field(default_factory=list)
+    nearest_stop: str = ""
+    transit_options: list = field(default_factory=list)  # [{"type":"metro","line":"12"}, ...]
     transit_exit: str = ""
+    closed_days: list[str] = field(default_factory=list)  # ["monday","tuesday"] = jours hebdo fermés
 
 
 def dict_to_activity(d: dict) -> Activity:
     """Convertit un dict venant de data_provider.build_city_data() en Activity."""
-    lines = d.get("transit_lines") or []
+    options = d.get("transit_options") or []
+    closed = d.get("closed_days") or []
     return Activity(
         id=d["id"],
         name=d["name"],
@@ -57,9 +59,10 @@ def dict_to_activity(d: dict) -> Activity:
         available_days=d.get("available_days", [0, 1, 2, 3, 4, 5, 6]),
         latitude=float(d.get("latitude", 0.0)),
         longitude=float(d.get("longitude", 0.0)),
-        nearest_metro_station=str(d.get("nearest_metro_station") or ""),
-        transit_lines=[str(l) for l in lines if l],
+        nearest_stop=str(d.get("nearest_stop") or ""),
+        transit_options=[o for o in options if isinstance(o, dict) and o.get("type")],
         transit_exit=str(d.get("transit_exit") or ""),
+        closed_days=[str(c).lower() for c in closed if isinstance(c, str)],
     )
 
 
@@ -95,6 +98,12 @@ class TravelConstraints:
     # Fenêtre horaire journalière (None = pas de contrainte)
     day_start_hour: Optional[int] = None   # heure souhaitée de début (ex: 9)
     day_end_hour: Optional[int] = None     # heure souhaitée de fin   (ex: 18)
+
+    # Dates de séjour (ISO YYYY-MM-DD)
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    # Jours de la semaine pour chaque jour du plan (0=lundi … 6=dimanche), dérivé de start_date
+    trip_weekdays: list[int] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────
@@ -509,28 +518,39 @@ class TravelPlannerSolver:
                         self.assign[b_id, d_b] + self.assign[a_id, d_a] <= 1
                     )
 
-    def _choose_segment_mode(self, foot_minutes: int, dist_m):
-        """
-        Choisit le mode de transport pour un segment donné.
+        # ── Fermetures hebdomadaires (closed_days × trip_weekdays) ───────────
+        # Si on connaît le jour de la semaine de chaque jour du séjour, on interdit
+        # de placer une activité sur un jour où elle est fermée.
+        _WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        for d in range(C.num_days):
+            if d >= len(C.trip_weekdays):
+                continue
+            weekday_name = _WEEKDAY_NAMES[C.trip_weekdays[d]]
+            for a_id, act in self.activities.items():
+                closed_days = getattr(act, "closed_days", None) or []
+                if weekday_name in closed_days and (a_id, d) in self.assign:
+                    self.model.add(self.assign[a_id, d] == 0)
 
-        Règle :
-          - Si le mode global est "car" ou "bike", on garde ce mode (la matrice
-            travel_time est déjà calculée pour ce mode).
-          - Si le mode global est "foot" (défaut) :
-              * marche ≤ 25 min → on garde "foot"
-              * sinon → on bascule sur transports en commun (métro/bus), estimé
-                à ~3× plus rapide que la marche (vitesse moyenne urbaine
-                ~12-15 km/h vs 4 km/h pour la marche), avec un minimum de 8 min
-                (temps d'attente / accès).
+    def _choose_segment_mode(self, foot_minutes: int, dist_m, src_act=None):
+        """
+        Choisit le mode de transport pour un segment.
+        Utilise les transit_options de l'activité de départ pour retourner
+        le type exact (metro, bus, rer, tram…) plutôt que le générique "transit".
         """
         base = getattr(self, "_transport_mode", "foot")
         if base in ("car", "bike"):
             return (base, foot_minutes)
-        # Mode "foot" : trop long à pied ?
+
         long_walk = foot_minutes > 25 and (dist_m is None or dist_m > 1500)
         if long_walk:
             transit_min = max(8, foot_minutes // 3 + 5)
-            return ("transit", transit_min)
+            # Déduire le mode précis depuis les transit_options de l'activité source
+            specific_mode = "transit"
+            if src_act and src_act.transit_options:
+                raw_type = (src_act.transit_options[0].get("type") or "").lower()
+                if raw_type in ("metro", "bus", "rer", "tram", "train", "funiculaire", "ferry", "navette"):
+                    specific_mode = raw_type
+            return (specific_mode, transit_min)
         return ("foot", foot_minutes)
 
     def _travel_minutes(self, a1_id: str, a2_id: str) -> int:
@@ -878,7 +898,7 @@ class TravelPlannerSolver:
                         src.latitude, src.longitude,
                         dst.latitude, dst.longitude,
                     )
-                mode, minutes = self._choose_segment_mode(int(travel_min), dist_m)
+                mode, minutes = self._choose_segment_mode(int(travel_min), dist_m, src)
                 transition = {
                     "from_id": a1["id"],
                     "to_id": a2["id"],
@@ -888,16 +908,16 @@ class TravelPlannerSolver:
                     "distance_m": int(round(dist_m)) if dist_m is not None else None,
                     "mode": mode,
                 }
-                # Enrichir les transitions en transports en commun avec station + ligne
+                # Enrichir les transitions en transports en commun
                 if mode == "transit":
-                    if src and src.nearest_metro_station:
-                        transition["from_station"] = src.nearest_metro_station
-                        transition["from_lines"] = src.transit_lines
+                    if src and src.nearest_stop:
+                        transition["from_stop"] = src.nearest_stop
+                        transition["from_transit"] = src.transit_options
                         if src.transit_exit:
                             transition["from_exit"] = src.transit_exit
-                    if dst and dst.nearest_metro_station:
-                        transition["to_station"] = dst.nearest_metro_station
-                        transition["to_lines"] = dst.transit_lines
+                    if dst and dst.nearest_stop:
+                        transition["to_stop"] = dst.nearest_stop
+                        transition["to_transit"] = dst.transit_options
                         if dst.transit_exit:
                             transition["to_exit"] = dst.transit_exit
                 transitions.append(transition)
@@ -1082,6 +1102,19 @@ def solve_with_city_data(
         if k in TravelConstraints.__dataclass_fields__
     })
 
+    # Dériver trip_weekdays depuis start_date
+    if constraints.start_date and not constraints.trip_weekdays:
+        try:
+            from datetime import date, timedelta
+            y, m, d = map(int, constraints.start_date.split("-"))
+            d0 = date(y, m, d)
+            constraints.trip_weekdays = [
+                (d0 + timedelta(days=i)).weekday()
+                for i in range(constraints.num_days)
+            ]
+        except (ValueError, TypeError):
+            constraints.trip_weekdays = []
+
     activities = [dict_to_activity(a) for a in city_data.get("activities", [])]
     if not activities:
         return {
@@ -1163,16 +1196,16 @@ def solve_with_city_data(
     result["city"] = city_data.get("city", {})
     result["data_source"] = city_data.get("data_source", "unknown")
     result["transport_mode"] = transport_mode
-    # Sélectionner un hôtel (si disponible dans city_data) dans le budget de l'utilisateur
+    result["start_date"] = constraints.start_date
+    result["end_date"] = constraints.end_date
+    result["trip_weekdays"] = constraints.trip_weekdays
+    # Sélectionner l'hôtel le moins cher (qui rentre dans le budget hôtel/nuit)
     hotel_options = city_data.get("hotels") or []
     if hotel_options:
         budget_per_night = constraints.hotel_per_night
-        # Préférer l'hôtel le plus cher ≤ budget, sinon le moins cher
         below = [h for h in hotel_options if (h.get("price_per_night") or 0) <= budget_per_night]
-        if below:
-            chosen = max(below, key=lambda h: h.get("price_per_night") or 0)
-        else:
-            chosen = min(hotel_options, key=lambda h: h.get("price_per_night") or 0)
+        pool = below if below else hotel_options
+        chosen = min(pool, key=lambda h: h.get("price_per_night") or 0)
         result["hotel"] = chosen
     if "days" in result:
         act_by_id = {a.id: a for a in activities}
@@ -1189,11 +1222,29 @@ def solve_with_city_data(
                     "opening_hours", "flexible_hours", "closed_days",
                     "price_info", "student_discount", "student_cost_euros",
                     "last_entry_before_close_minutes",
-                    "nearest_metro_station", "transit_lines", "transit_exit",
+                    "address",
+                    "nearest_stop", "transit_options", "transit_exit",
                     "data_confidence", "data_source",
                 ):
                     if field_name in src_dict:
                         act[field_name] = src_dict[field_name]
+
+    # Enrichir les transitions "transit" avec itinéraires étape par étape
+    if result.get("days"):
+        city_name = city_data.get("city", {}).get("name", constraints.destination)
+        # Ajouter l'adresse dans chaque transition pour aider le routeur
+        src_addr = {a["id"]: a.get("address", "") for a in city_data.get("activities", [])}
+        for day in result["days"]:
+            for trans in day.get("transitions", []):
+                trans.setdefault("from_address", src_addr.get(trans.get("from_id", ""), ""))
+                trans.setdefault("to_address", src_addr.get(trans.get("to_id", ""), ""))
+        try:
+            from transit_router import enrich_transitions_with_routing
+            result = enrich_transitions_with_routing(result, city_name)
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning("[Solver] Transit routing skipped: %s", e)
+
     return result
 
 
