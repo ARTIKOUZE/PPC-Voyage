@@ -163,6 +163,10 @@ class ExtractedConstraints(BaseModel):
 
     transport_mode: Optional[str] = None  # "foot", "bike", "car"
 
+    # Dates de séjour
+    start_date: Optional[str] = None     # ISO YYYY-MM-DD
+    end_date: Optional[str] = None       # ISO YYYY-MM-DD
+
     def clean(self) -> dict:
         """Retourne un dict ne contenant que les champs renseignés et validés."""
         out = {}
@@ -178,13 +182,16 @@ class ExtractedConstraints(BaseModel):
             if k == "transport_mode" and v not in VALID_TRANSPORT:
                 continue
             if k == "must_visit_on_day":
-                # Valider : clés = strings, valeurs = entiers ≥ 1
                 v = {
                     str(act): int(day)
                     for act, day in v.items()
                     if isinstance(day, (int, float)) and int(day) >= 1
                 }
                 if not v:
+                    continue
+            if k in ("start_date", "end_date"):
+                import re as _re
+                if not _re.match(r"^\d{4}-\d{2}-\d{2}$", str(v)):
                     continue
             out[k] = v
         return out
@@ -217,6 +224,16 @@ AUTHORIZED FIELDS:
 - day_start_hour (int, 0-23): hour when the user wants to start activities each day (e.g. 9 for 9h)
 - day_end_hour (int, 1-24): hour when the user wants to stop activities each day (e.g. 18 for 18h, 24 for midnight)
 - transport_mode (string): "foot" (walking, default), "bike" (vélo), or "car" (voiture). Detect from words like "à pied", "marche", "vélo", "voiture", "en bus" (→ car).
+- start_date (string ISO YYYY-MM-DD): exact arrival date. Always normalize to ISO format.
+- end_date (string ISO YYYY-MM-DD): exact departure date. Compute it if user gives start_date + num_days (end = start + num_days - 1).
+
+DATE HANDLING:
+- Convert ANY date format the user provides to ISO YYYY-MM-DD.
+- "12/06/2026" → "2026-06-12"  (DD/MM/YYYY is French standard)
+- "14 août 2026" → "2026-08-14"
+- "week-end du 14 juin" → start_date="2026-06-13" (Saturday), end_date="2026-06-14" (Sunday), num_days=2
+- If user says "j'arrive le 12/06/2026 pour 3 jours" → start_date="2026-06-12", num_days=3, end_date="2026-06-14"
+- If user says "du 5 au 8 septembre" (year omitted) → use current/next year accordingly.
 
 STRICT RULES:
 1. Respond ONLY with valid JSON (no markdown, no ```, no comments).
@@ -257,6 +274,18 @@ User: "Can you add the Eiffel Tower on day 1?"
 
 User: "Inclure Notre-Dame le jour 2 et le Louvre le jour 4"
 → {"must_visit":["notre-dame","louvre"],"must_visit_on_day":{"notre-dame":2,"louvre":4}}
+
+User: "du lundi 12/06/2026 au jeudi 15/06/2026"
+→ {"start_date":"2026-06-12","end_date":"2026-06-15","num_days":4}
+
+User: "j'arrive le 12/06/2026 et je reste 3 jours"
+→ {"start_date":"2026-06-12","end_date":"2026-06-14","num_days":3}
+
+User: "week-end du 14 août 2026"
+→ {"start_date":"2026-08-15","end_date":"2026-08-16","num_days":2}
+
+User: "du 5 au 8 septembre 2026"
+→ {"start_date":"2026-09-05","end_date":"2026-09-08","num_days":4}
 
 RELATIVE REQUESTS — interpret in context of "Contraintes actuelles":
 

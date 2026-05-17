@@ -79,10 +79,18 @@ function ConstraintBadge({ label, value }) {
 }
 
 const TRANSPORT_LABELS = {
-  foot: { icon: "🚶", label: "À pied" },
-  bike: { icon: "🚲", label: "Vélo" },
-  car: { icon: "🚗", label: "Voiture" },
-  transit: { icon: "🚇", label: "Métro/Bus" },
+  foot:        { icon: "🚶", label: "À pied",     color: "#8B6F4E" },
+  metro:       { icon: "🚇", label: "Métro",      color: "#003189" },
+  bus:         { icon: "🚌", label: "Bus",         color: "#1A7A1A" },
+  rer:         { icon: "🚆", label: "RER",         color: "#6B3FA0" },
+  tram:        { icon: "🚊", label: "Tramway",     color: "#9B1C1C" },
+  train:       { icon: "🚂", label: "Train",       color: "#1A5276" },
+  funiculaire: { icon: "🚡", label: "Funiculaire", color: "#7D3C00" },
+  ferry:       { icon: "⛴",  label: "Ferry",       color: "#154360" },
+  navette:     { icon: "🚐", label: "Navette",     color: "#2E4057" },
+  transit:     { icon: "🚇", label: "Transports",  color: "#555" },
+  bike:        { icon: "🚲", label: "Vélo",        color: "#6B8E23" },
+  car:         { icon: "🚗", label: "Voiture",     color: "#8B0000" },
 };
 
 function formatDistance(meters) {
@@ -91,27 +99,13 @@ function formatDistance(meters) {
   return `${(meters / 1000).toFixed(1)} km`;
 }
 
-function formatLines(lines) {
-  if (!lines || lines.length === 0) return null;
-  return lines.map(l => (
-    <span key={l} style={{
-      display: "inline-block", minWidth: 18, textAlign: "center",
-      background: "#2D6ADB", color: "#fff",
-      borderRadius: 4, padding: "0 4px", fontSize: 10, fontWeight: 700,
-      marginLeft: 2, lineHeight: "16px",
-    }}>{l}</span>
-  ));
-}
+
 
 function TransitionRow({ transition }) {
   if (!transition) return null;
   const t = TRANSPORT_LABELS[transition.mode] || TRANSPORT_LABELS.foot;
   const dist = formatDistance(transition.distance_m);
-  const isTransit = transition.mode === "transit";
-  const fromStation = transition.from_station;
-  const toStation = transition.to_station;
-  const fromLines = transition.from_lines;
-  const toLines = transition.to_lines;
+  const color = t.color || "#8B6F4E";
 
   return (
     <div style={{
@@ -119,44 +113,55 @@ function TransitionRow({ transition }) {
       fontSize: 11, color: "#8B6F4E",
       fontFamily: "'DM Mono', monospace",
     }}>
-      {/* Ligne principale : icône — durée — distance — mode */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span style={{ fontSize: 14 }}>{t.icon}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {/* Icône colorée selon le mode */}
+        <span style={{
+          fontSize: 13,
+          background: `${color}18`,
+          border: `1px solid ${color}44`,
+          borderRadius: 6,
+          padding: "1px 5px",
+          color,
+        }}>
+          {t.icon}
+        </span>
+
         <span style={{
           flex: 1, height: 1,
           background: "repeating-linear-gradient(to right, #C8B89C 0 4px, transparent 4px 8px)",
         }} />
-        <span>{transition.minutes} min</span>
-        {dist && <span style={{ opacity: 0.7 }}>· {dist}</span>}
-        <span style={{ opacity: 0.7 }}>· {t.label}</span>
-      </div>
 
-      {/* Détail métro : station départ → station arrivée avec lignes */}
-      {isTransit && (fromStation || toStation) && (
-        <div style={{
-          marginTop: 3, marginLeft: 24,
-          display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4,
-          fontSize: 10, color: "#5A4232",
+        <span style={{ fontWeight: 600 }}>{transition.minutes} min</span>
+        {dist && <span style={{ opacity: 0.6 }}>· {dist}</span>}
+
+        {/* Badge mode */}
+        <span style={{
+          background: `${color}18`, color,
+          border: `1px solid ${color}55`,
+          borderRadius: 8, padding: "1px 7px",
+          fontSize: 10, fontWeight: 600,
         }}>
-          {fromStation && (
-            <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
-              <span style={{ opacity: 0.6 }}>Départ</span>
-              <strong style={{ marginLeft: 2 }}>{fromStation}</strong>
-              {formatLines(fromLines)}
-            </span>
-          )}
-          {fromStation && toStation && (
-            <span style={{ opacity: 0.5, margin: "0 2px" }}>→</span>
-          )}
-          {toStation && (
-            <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
-              <span style={{ opacity: 0.6 }}>Descendre à</span>
-              <strong style={{ marginLeft: 2 }}>{toStation}</strong>
-              {formatLines(toLines)}
-            </span>
-          )}
-        </div>
-      )}
+          {t.label}
+        </span>
+
+        {/* Bouton Google Maps pour tous les modes */}
+        {transition.maps_url && (
+          <a
+            href={transition.maps_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 3,
+              padding: "2px 8px", borderRadius: 10,
+              background: "#1a73e8", color: "#fff",
+              fontSize: 10, fontWeight: 600, textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            🗺 Itinéraire
+          </a>
+        )}
+      </div>
     </div>
   );
 }
@@ -249,14 +254,23 @@ function TimelineActivity({ activity, travelers }) {
         <div style={{
           fontSize: 14, fontWeight: 600, color: cat.text,
           fontFamily: "'Instrument Serif', Georgia, serif",
-          marginBottom: 3,
+          marginBottom: 2,
         }}>{activity.name}</div>
+        {activity.address && (
+          <div style={{
+            fontSize: 10, color: cat.text, opacity: 0.65,
+            fontFamily: "'DM Mono', monospace",
+            marginBottom: 3,
+          }}>
+            📍 {activity.address}{activity.zone ? ` (${activity.zone})` : ""}
+          </div>
+        )}
         <div style={{
           display: "flex", gap: 10, fontSize: 11, color: cat.text, opacity: 0.7,
           fontFamily: "'DM Mono', monospace",
         }}>
           <span>{activity.duration_hours ?? activity.duration}h</span>
-          {activity.zone && <span>📍 {activity.zone}</span>}
+          {!activity.address && activity.zone && <span>📍 {activity.zone}</span>}
           {cost > 0 && <span>{cost * (travelers || 1)}€</span>}
           {cost === 0 && <span style={{ color: "#2E5C2E" }}>Gratuit</span>}
         </div>
@@ -265,9 +279,29 @@ function TimelineActivity({ activity, travelers }) {
   );
 }
 
-function DayCard({ day, travelers }) {
+const WEEKDAY_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"];
+
+function formatDayHeader(dayIndex1, startDate, weekdays) {
+  if (!startDate) return `Jour ${dayIndex1}`;
+  // dayIndex1 est 1-indexé, weekdays est 0-indexé
+  const idx = dayIndex1 - 1;
+  const wd = (weekdays && weekdays[idx] != null) ? WEEKDAY_FR[weekdays[idx]] : "";
+  // Calcul de la date réelle
+  try {
+    const [y, m, d] = startDate.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + idx));
+    const dd = String(dt.getUTCDate()).padStart(2, "0");
+    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    return wd ? `${wd} ${dd}/${mm}` : `${dd}/${mm}`;
+  } catch {
+    return wd || `Jour ${dayIndex1}`;
+  }
+}
+
+function DayCard({ day, travelers, startDate, weekdays }) {
   if (!day) return null;
   const transitions = day.transitions || [];
+  const heading = formatDayHeader(day.day, startDate, weekdays);
   return (
     <div style={{ padding: 16 }}>
       <div style={{
@@ -278,7 +312,7 @@ function DayCard({ day, travelers }) {
           margin: 0, fontSize: 18,
           fontFamily: "'Instrument Serif', Georgia, serif",
           color: "#3C2415",
-        }}>Jour {day.day}</h3>
+        }}>{heading}</h3>
         <div style={{
           display: "flex", gap: 10, alignItems: "center",
           fontSize: 12, color: "#A0785A",
@@ -1051,27 +1085,42 @@ export default function TravelPlannerApp() {
             display: "flex", gap: 4, padding: "0 20px 8px",
             borderBottom: "1px solid #E8E0D8", flexWrap: "wrap",
           }}>
-            {plan.days.map((d, i) => (
-              <button key={i}
-                onClick={() => setActiveDay(i)}
-                style={{
-                  padding: "6px 16px", borderRadius: 8,
-                  background: activeDay === i ? "#3C2415" : "transparent",
-                  color: activeDay === i ? "#F5F0EB" : "#5C4033",
-                  border: activeDay === i ? "none" : "1px solid #E8E0D8",
-                  fontSize: 13, cursor: "pointer",
-                  fontFamily: "'DM Mono', monospace",
-                }}
-              >
-                J{d.day} <span style={{ opacity: 0.6 }}>({d.activities.length})</span>
-              </button>
-            ))}
+            {plan.days.map((d, i) => {
+              const dayLabel = plan?.start_date
+                ? formatDayHeader(d.day, plan.start_date, plan.trip_weekdays).split(" ")[0].slice(0, 3)
+                : `J${d.day}`;
+              const dateSuffix = plan?.start_date
+                ? formatDayHeader(d.day, plan.start_date, plan.trip_weekdays).split(" ")[1] || ""
+                : "";
+              return (
+                <button key={i}
+                  onClick={() => setActiveDay(i)}
+                  style={{
+                    padding: "6px 14px", borderRadius: 8,
+                    background: activeDay === i ? "#3C2415" : "transparent",
+                    color: activeDay === i ? "#F5F0EB" : "#5C4033",
+                    border: activeDay === i ? "none" : "1px solid #E8E0D8",
+                    fontSize: 12, cursor: "pointer",
+                    fontFamily: "'DM Mono', monospace",
+                    lineHeight: 1.3,
+                  }}
+                >
+                  {dayLabel}{dateSuffix && <> <span style={{ opacity: 0.7 }}>{dateSuffix}</span></>}
+                  <span style={{ opacity: 0.5, marginLeft: 4 }}>({d.activities.length})</span>
+                </button>
+              );
+            })}
           </div>
         )}
 
         {activeDayData && (
           <div style={{ padding: "0 20px", flex: 1 }}>
-            <DayCard day={activeDayData} travelers={constraints?.num_travelers || 1} />
+            <DayCard
+              day={activeDayData}
+              travelers={constraints?.num_travelers || 1}
+              startDate={plan?.start_date}
+              weekdays={plan?.trip_weekdays}
+            />
           </div>
         )}
 

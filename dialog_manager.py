@@ -27,6 +27,11 @@ CRITICAL_FIELDS: dict[str, str] = {
     "destination": "Tu veux partir où ?",
     "total_budget": "Quel est ton budget maximum (en euros) ?",
     "num_days": "Combien de jours dure ton voyage ?",
+    "start_date": (
+        "Quelles sont tes dates exactes de séjour ? "
+        "(ex: \"du 12/06/2026 au 15/06/2026\" ou \"j'arrive le 12/06/2026 pour 3 jours\") "
+        "— sans ça je ne peux pas vérifier les jours d'ouverture des activités."
+    ),
 }
 
 # Questions pour clarifier les valeurs vagues
@@ -48,6 +53,11 @@ _VAGUE_CLARIFICATIONS: dict[str, str] = {
     "day_end_hour": (
         "Jusqu'à quelle heure veux-tu faire des activités ? (ex: 18h, 20h, 22h)"
     ),
+    "start_date": (
+        "Pour vérifier les jours d'ouverture des activités, j'ai besoin de tes dates "
+        "exactes de séjour. Format : \"12/06/2026 au 15/06/2026\" ou "
+        "\"j'arrive le 12/06/2026 pour 3 jours\"."
+    ),
 }
 
 # Labels humains pour les messages de récapitulatif
@@ -55,6 +65,7 @@ _FIELD_LABELS: dict[str, str] = {
     "destination": "la destination",
     "total_budget": "le budget",
     "num_days": "la durée du séjour",
+    "start_date": "les dates exactes de séjour",
     "day_start_hour": "l'heure de début de journée",
     "day_end_hour": "l'heure de fin de journée",
 }
@@ -86,6 +97,12 @@ def _is_missing(field: str, value) -> bool:
         if not isinstance(value, (int, float)):
             return True
         return not (1 <= value <= 24)
+
+    if field == "start_date":
+        if not isinstance(value, str):
+            return True
+        import re as _re
+        return not _re.match(r"^\d{4}-\d{2}-\d{2}$", value)
 
     return False
 
