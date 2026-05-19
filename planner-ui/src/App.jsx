@@ -18,18 +18,6 @@ async function callChat(sessionId, message) {
   return resp.json();
 }
 
-async function callPlanForm(sessionId, formConstraints) {
-  const body = { session_id: sessionId, constraints: formConstraints };
-
-  const resp = await fetch(`${API_BASE}/plan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) throw new Error(`Backend error ${resp.status}`);
-  return resp.json();
-}
-
 async function callReset(sessionId) {
   await fetch(`${API_BASE}/reset`, {
     method: "POST",
@@ -456,219 +444,6 @@ function ChatMessage({ message }) {
   );
 }
 
-function SourceStatsBadge({ stats }) {
-  if (!stats) return null;
-  const isForm = stats.source === "form";
-  return (
-    <div style={{
-      margin: "8px 16px 0", padding: "8px 12px", borderRadius: 8,
-      background: isForm ? "#EBF1FB" : "#FBF3E8",
-      border: `1px solid ${isForm ? "#C8D8EE" : "#E2CFB2"}`,
-      fontSize: 11, color: "#5C4033",
-      fontFamily: "'DM Mono', monospace",
-      display: "flex", flexWrap: "wrap", gap: 12,
-    }}>
-      <span><strong>Source :</strong> {isForm ? "📋 Formulaire" : "💬 Chat"}</span>
-      <span>extraction : {stats.extraction_ms != null ? `${stats.extraction_ms}ms` : "—"}</span>
-      <span>total : {stats.total_pipeline_ms != null ? `${stats.total_pipeline_ms}ms` : "—"}</span>
-      {stats.chars_typed > 0 && <span>caractères : {stats.chars_typed}</span>}
-      {stats.fields_filled != null && <span>champs : {stats.fields_filled}</span>}
-    </div>
-  );
-}
-
-const CAT_OPTIONS = ["culture", "gastro", "nature", "shopping", "nightlife"];
-
-function FormPanel({ value, onChange, onSubmit, loading }) {
-  const upd = (k, v) => onChange({ ...value, [k]: v });
-  const toggleCat = (field, cat) => {
-    const arr = value[field] || [];
-    const next = arr.includes(cat) ? arr.filter(c => c !== cat) : [...arr, cat];
-    upd(field, next);
-  };
-  const inputStyle = {
-    width: "100%", padding: "6px 10px", borderRadius: 8,
-    border: "1px solid #E8E0D8", background: "#FDFBF7",
-    fontSize: 13, fontFamily: "'DM Mono', monospace",
-    color: "#3C2415", boxSizing: "border-box",
-  };
-  const labelStyle = {
-    fontSize: 11, color: "#8B6F4E", marginBottom: 3,
-    fontFamily: "'DM Mono', monospace",
-  };
-  const fieldsFilled = Object.entries(value).filter(([, v]) => {
-    if (v === "" || v == null) return false;
-    if (Array.isArray(v) && v.length === 0) return false;
-    return true;
-  }).length;
-
-  return (
-    <div style={{
-      flex: 1, overflowY: "auto", padding: "12px 16px",
-      display: "flex", flexDirection: "column", gap: 10,
-    }}>
-      <div style={{
-        fontSize: 11, color: "#888",
-        fontFamily: "'Instrument Serif', Georgia, serif",
-        fontStyle: "italic", marginBottom: 4,
-      }}>
-        Mode formulaire : extraction LLM bypassée. Compare la friction et la
-        couverture avec le mode chat.
-      </div>
-
-      <div style={{ display: "flex", gap: 8 }}>
-        <div style={{ flex: 2 }}>
-          <div style={labelStyle}>Destination *</div>
-          <input style={inputStyle} value={value.destination}
-                 onChange={e => upd("destination", e.target.value)}
-                 placeholder="Rome, Paris…" />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={labelStyle}>Jours *</div>
-          <input type="number" style={inputStyle} value={value.num_days}
-                 min={1} max={21}
-                 onChange={e => upd("num_days", Number(e.target.value))} />
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 8 }}>
-        <div style={{ flex: 1 }}>
-          <div style={labelStyle}>Budget total (€) *</div>
-          <input type="number" style={inputStyle} value={value.total_budget}
-                 min={0}
-                 onChange={e => upd("total_budget", Number(e.target.value))} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={labelStyle}>Voyageurs</div>
-          <input type="number" style={inputStyle} value={value.num_travelers}
-                 min={1} max={20}
-                 onChange={e => upd("num_travelers", Number(e.target.value))} />
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 8 }}>
-        <div style={{ flex: 1 }}>
-          <div style={labelStyle}>Hôtel max €/nuit</div>
-          <input type="number" style={inputStyle} value={value.hotel_per_night}
-                 min={0}
-                 onChange={e => upd("hotel_per_night", Number(e.target.value))} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={labelStyle}>Repas €/jour/pers</div>
-          <input type="number" style={inputStyle} value={value.daily_food_budget}
-                 min={0}
-                 onChange={e => upd("daily_food_budget", Number(e.target.value))} />
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 8 }}>
-        <div style={{ flex: 1 }}>
-          <div style={labelStyle}>Début (h)</div>
-          <input type="number" style={inputStyle} value={value.day_start_hour}
-                 min={0} max={23}
-                 onChange={e => upd("day_start_hour", Number(e.target.value))} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={labelStyle}>Fin (h)</div>
-          <input type="number" style={inputStyle} value={value.day_end_hour}
-                 min={1} max={24}
-                 onChange={e => upd("day_end_hour", Number(e.target.value))} />
-        </div>
-      </div>
-
-      <div>
-        <div style={labelStyle}>Rythme</div>
-        <div style={{ display: "flex", gap: 4 }}>
-          {[
-            { k: "relaxed", l: "🌿 Relax" },
-            { k: "moderate", l: "⚖ Modéré" },
-            { k: "intense", l: "⚡ Intense" },
-          ].map(opt => {
-            const active = value.preferred_pace === opt.k;
-            return (
-              <button key={opt.k}
-                      onClick={() => upd("preferred_pace", opt.k)}
-                      style={{
-                        flex: 1, padding: "6px 8px", borderRadius: 8,
-                        background: active ? "#3C2415" : "#F5F0EB",
-                        color: active ? "#F5F0EB" : "#5C4033",
-                        border: `1px solid ${active ? "#3C2415" : "#E8E0D8"}`,
-                        fontSize: 11, cursor: "pointer",
-                        fontFamily: "'DM Mono', monospace",
-                      }}>{opt.l}</button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div>
-        <div style={labelStyle}>Catégories préférées</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-          {CAT_OPTIONS.map(cat => {
-            const active = (value.preferred_categories || []).includes(cat);
-            return (
-              <button key={cat}
-                      onClick={() => toggleCat("preferred_categories", cat)}
-                      style={{
-                        padding: "4px 10px", borderRadius: 14,
-                        background: active ? "#A0785A" : "#F5F0EB",
-                        color: active ? "#FFF" : "#5C4033",
-                        border: `1px solid ${active ? "#A0785A" : "#E8E0D8"}`,
-                        fontSize: 11, cursor: "pointer",
-                        fontFamily: "'DM Mono', monospace",
-                      }}>{cat}</button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div>
-        <div style={labelStyle}>Catégories évitées</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-          {CAT_OPTIONS.map(cat => {
-            const active = (value.avoided_categories || []).includes(cat);
-            return (
-              <button key={cat}
-                      onClick={() => toggleCat("avoided_categories", cat)}
-                      style={{
-                        padding: "4px 10px", borderRadius: 14,
-                        background: active ? "#8B2500" : "#F5F0EB",
-                        color: active ? "#FFF" : "#5C4033",
-                        border: `1px solid ${active ? "#8B2500" : "#E8E0D8"}`,
-                        fontSize: 11, cursor: "pointer",
-                        fontFamily: "'DM Mono', monospace",
-                      }}>{cat}</button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div style={{
-        marginTop: 6, padding: "8px 10px", borderRadius: 8,
-        background: "#FBF3E8", border: "1px solid #E2CFB2",
-        fontSize: 11, color: "#5C4033",
-        fontFamily: "'DM Mono', monospace",
-      }}>
-        {fieldsFilled} champ{fieldsFilled > 1 ? "s" : ""} renseigné{fieldsFilled > 1 ? "s" : ""}.
-        Couverture limitée : pas de « must-visit », pas de jour précis,
-        pas de contraintes conditionnelles.
-      </div>
-
-      <button
-        onClick={onSubmit}
-        disabled={loading || !value.destination}
-        style={{
-          padding: "12px 18px", borderRadius: 12,
-          background: loading ? "#ccc" : "#3C2415",
-          color: "#F5F0EB", border: "none",
-          fontSize: 14, cursor: loading ? "default" : "pointer",
-          fontFamily: "'DM Mono', monospace",
-        }}
-      >Planifier (sans LLM d'extraction)</button>
-    </div>
-  );
-}
-
 // ─── Main App ───
 
 export default function TravelPlannerApp() {
@@ -686,20 +461,6 @@ export default function TravelPlannerApp() {
   const [activeDay, setActiveDay] = useState(0);
   const [loading, setLoading] = useState(false);
   const [showConstraints, setShowConstraints] = useState(false);
-  const [formState, setFormState] = useState({
-    destination: "",
-    num_days: 5,
-    total_budget: 1500,
-    num_travelers: 1,
-    hotel_per_night: 100,
-    daily_food_budget: 50,
-    day_start_hour: 9,
-    day_end_hour: 19,
-    preferred_pace: "moderate",
-    preferred_categories: [],
-    avoided_categories: [],
-  });
-  const [lastSourceStats, setLastSourceStats] = useState(null); // {source, extraction_ms, total_pipeline_ms, fields_filled, chars_typed}
   const chatEndRef = useRef(null);
 
   useEffect(() => {
@@ -729,13 +490,6 @@ export default function TravelPlannerApp() {
       if (result.plan?.data_source) setDataSource(result.plan.data_source);
       if (result.plan?.hotel) setHotel(result.plan.hotel);
       setActiveDay(0);
-      setLastSourceStats({
-        source: result.source || "chat",
-        extraction_ms: result.extraction_ms ?? null,
-        total_pipeline_ms: result.total_pipeline_ms ?? null,
-        chars_typed: userMsg.length,
-        fields_filled: null,
-      });
 
       setMessages(prev => [
         ...prev.slice(0, -1),
@@ -750,52 +504,6 @@ export default function TravelPlannerApp() {
     }
     setLoading(false);
   }, [input, sessionId, loading]);
-
-  const handleFormSubmit = useCallback(async () => {
-    if (loading) return;
-    setLoading(true);
-    // Construire les contraintes à envoyer (omettre les champs vides/par défaut)
-    const constraintsToSend = {};
-    let fieldsFilled = 0;
-    for (const [k, v] of Object.entries(formState)) {
-      if (v === "" || v === null || v === undefined) continue;
-      if (Array.isArray(v) && v.length === 0) continue;
-      constraintsToSend[k] = v;
-      fieldsFilled++;
-    }
-    try {
-      const result = await callPlanForm(sessionId, constraintsToSend);
-      setConstraints(result.constraints);
-      if (result.plan) setPlan(result.plan);
-      if (result.city) setCity(result.city);
-      if (result.plan?.hotel) setHotel(result.plan.hotel);
-      if (result.plan?.data_source) setDataSource(result.plan.data_source);
-      setActiveDay(0);
-      setLastSourceStats({
-        source: "form",
-        extraction_ms: result.extraction_ms ?? 0,
-        total_pipeline_ms: result.total_pipeline_ms ?? null,
-        chars_typed: 0,
-        fields_filled: fieldsFilled,
-      });
-      // Ajouter aussi un message dans le chat pour traçabilité
-      setMessages(prev => [
-        ...prev,
-        {
-          role: "user",
-          content: `[Formulaire] ${fieldsFilled} champs envoyés`,
-          extracted: constraintsToSend,
-        },
-        { role: "assistant", content: result.reply, errors: result.errors },
-      ]);
-    } catch (e) {
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: `Erreur côté backend : ${e.message}`,
-      }]);
-    }
-    setLoading(false);
-  }, [formState, sessionId, loading]);
 
   const handleReset = useCallback(async () => {
     await callReset(sessionId);
@@ -828,9 +536,9 @@ export default function TravelPlannerApp() {
       background: "#FDFBF7",
       overflow: "hidden",
     }}>
-      {/* ─── Col 1 : Chat (langage naturel) ─── */}
+      {/* ─── Gauche : Chat ─── */}
       <div style={{
-        width: "30%", minWidth: 320,
+        width: "40%", minWidth: 340,
         display: "flex", flexDirection: "column",
         borderRight: "1px solid #E8E0D8",
         background: "#FFFFFF",
@@ -865,13 +573,6 @@ export default function TravelPlannerApp() {
             }}
           >reset</button>
         </div>
-
-        <div style={{
-          padding: "8px 16px 0",
-          fontSize: 10, color: "#999",
-          fontFamily: "'DM Mono', monospace",
-          textTransform: "uppercase", letterSpacing: 0.5,
-        }}>Mode 1 : extraction LLM</div>
 
         <div style={{
           flex: 1, overflowY: "auto", padding: "12px 16px 8px",
@@ -943,39 +644,7 @@ export default function TravelPlannerApp() {
         </div>
       </div>
 
-      {/* ─── Col 2 : Formulaire (sans LLM d'extraction) ─── */}
-      <div style={{
-        width: "25%", minWidth: 280,
-        display: "flex", flexDirection: "column",
-        borderRight: "1px solid #E8E0D8",
-        background: "#FAF7F2",
-      }}>
-        <div style={{
-          padding: "16px 16px 12px",
-          borderBottom: "1px solid #E8E0D8",
-          background: "#5C4033",
-          color: "#F5F0EB",
-        }}>
-          <h2 style={{
-            margin: 0, fontSize: 16,
-            fontFamily: "'Instrument Serif', Georgia, serif",
-            fontWeight: 400,
-          }}>📋 Formulaire</h2>
-          <p style={{
-            margin: "2px 0 0", fontSize: 11, opacity: 0.75,
-            fontFamily: "'DM Mono', monospace",
-          }}>Mode 2 : contraintes structurées (sans LLM)</p>
-        </div>
-
-        <FormPanel
-          value={formState}
-          onChange={setFormState}
-          onSubmit={handleFormSubmit}
-          loading={loading}
-        />
-      </div>
-
-      {/* ─── Col 3 : Plan + comparaison ─── */}
+      {/* ─── Droite : Plan ─── */}
       <div style={{
         flex: 1, display: "flex", flexDirection: "column",
         overflowY: "auto", background: "#FDFBF7",
@@ -1027,10 +696,6 @@ export default function TravelPlannerApp() {
           }}>
             <strong>Plan infaisable.</strong> {plan.message}
           </div>
-        )}
-
-        {lastSourceStats && (
-          <SourceStatsBadge stats={lastSourceStats} />
         )}
 
         {plan?.summary && (
