@@ -39,7 +39,10 @@ DEFAULT_CONSTRAINTS = {
     "day_end_hour": 19,
     # Valeurs par défaut raisonnables pour les champs optionnels
     "num_travelers": 1,
-    "hotel_per_night": 100,
+    # hotel_per_night : None → auto-calculé à 40 % du budget total / num_days
+    # (permet à un budget plus élevé de proposer naturellement des hôtels haut de gamme).
+    # Sera surchargé si l'utilisateur précise explicitement "hôtel max X€/nuit".
+    "hotel_per_night": None,
     "daily_food_budget": 60,
     "preferred_categories": [],
     "avoided_categories": [],
@@ -48,7 +51,7 @@ DEFAULT_CONSTRAINTS = {
     "must_avoid": [],
     "must_visit_on_day": {},
     "max_activities_per_day": 6,
-    "min_activities_per_day": 1,
+    "min_activities_per_day": 2,
     "transport_mode": None,
     # Dates de séjour (ISO YYYY-MM-DD) — critique pour vérifier les ouvertures
     "start_date": None,
@@ -58,11 +61,19 @@ DEFAULT_CONSTRAINTS = {
 
 class SessionStore:
     """Stockage en mémoire des contraintes par session_id, plus métadonnées
-    de dialogue (dernier champ demandé)."""
+    de dialogue (dernier champ demandé) et données ville scoped session.
+
+    Le cache ville par session est CRITIQUE pour la stabilité multi-tours :
+    chaque appel LLM génère un set d'activités différent (IDs aléatoires),
+    donc sans ce cache le plan précédent ne peut pas être préservé (bonus
+    de stabilité ne matche rien, pinning impossible). Le cache est invalidé
+    par reset() ou par changement de destination/transport.
+    """
 
     def __init__(self):
         self._sessions: dict[str, dict] = {}
         self._meta: dict[str, dict] = {}
+        self._city_data: dict[str, dict] = {}  # session_id → {key: city_data}
         self._lock = threading.Lock()
 
     def get(self, session_id: str) -> dict:
@@ -83,10 +94,28 @@ class SessionStore:
         with self._lock:
             self._meta[session_id] = dict(meta)
 
+    def get_city_data(
+        self, session_id: str, destination: str, transport_mode: str,
+    ) -> Optional[dict]:
+        """Récupère les données ville cachées pour cette session, si elles
+        correspondent à (destination, transport_mode). Sinon None."""
+        key = f"{(destination or '').lower().strip()}|{transport_mode or 'foot'}"
+        with self._lock:
+            store = self._city_data.get(session_id, {})
+            return store.get(key)
+
+    def set_city_data(
+        self, session_id: str, destination: str, transport_mode: str, data: dict,
+    ):
+        key = f"{(destination or '').lower().strip()}|{transport_mode or 'foot'}"
+        with self._lock:
+            self._city_data.setdefault(session_id, {})[key] = data
+
     def reset(self, session_id: str):
         with self._lock:
             self._sessions.pop(session_id, None)
             self._meta.pop(session_id, None)
+            self._city_data.pop(session_id, None)
 
 
 _store = SessionStore()
@@ -170,6 +199,8 @@ def _determine_touched_days(extracted: dict, previous_plan: dict) -> Optional[se
 # Champs dictionnaire : les clés sont unionnées (la nouvelle valeur écrase l'ancienne)
 DICT_FIELDS = {
     "must_visit_on_day",
+    "min_per_category",
+    "max_per_category",
 }
 
 INCOMPATIBLE_PAIRS = [
@@ -221,6 +252,24 @@ def _strip_default_reemissions(extracted: dict, current: dict) -> dict:
     return cleaned
 
 
+def _is_invalid_critical_update(key: str, value) -> bool:
+    """
+    Détecte les valeurs invalides pour les champs critiques.
+    Évite que le LLM, en ré-émettant accidentellement un champ avec une
+    valeur vide/zéro, écrase une valeur valide existante dans l'état.
+    """
+    if key not in CRITICAL_FIELDS:
+        return False
+    if key == "destination":
+        return not isinstance(value, str) or len(value.strip()) < 2
+    if key in ("total_budget", "num_days"):
+        return not isinstance(value, (int, float)) or value <= 0
+    if key == "start_date":
+        import re as _re
+        return not isinstance(value, str) or not _re.match(r"^\d{4}-\d{2}-\d{2}$", value)
+    return False
+
+
 def merge_constraints(current: dict, update: dict) -> dict:
     """
     Fusionne les contraintes.
@@ -228,11 +277,16 @@ def merge_constraints(current: dict, update: dict) -> dict:
     - Scalaires : remplacement.
     - Résolution de conflits : si une catégorie apparaît dans preferred et avoided,
       le champ modifié dans `update` gagne.
+    - Protection : un update qui invaliderait un champ critique déjà valide
+      est ignoré (le LLM ré-émet parfois `destination: ""` par erreur).
     """
     merged = dict(current)
 
     for key, value in update.items():
         if value is None:
+            continue
+        # Garde anti-écrasement : ne pas invalider un champ critique déjà valide
+        if _is_invalid_critical_update(key, value) and not _is_invalid_critical_update(key, merged.get(key)):
             continue
         if key in ARRAY_FIELDS and isinstance(value, list):
             existing = merged.get(key, []) or []
@@ -258,9 +312,85 @@ def merge_constraints(current: dict, update: dict) -> dict:
 # Chargement des données ville (sans cache : LLM appelé à chaque requête)
 # ─────────────────────────────────────────────
 
-def load_city_data(city_name: str, transport_mode: str = "foot") -> Optional[dict]:
-    """Génère les données d'une ville via le LLM. Pas de cache : toujours frais."""
-    return generate_city_data(city_name, transport_mode=transport_mode)
+def load_city_data(
+    city_name: str, transport_mode: str = "foot", num_days: int = 5,
+) -> Optional[dict]:
+    """Génère les données d'une ville via le LLM (pas de cache global).
+    `num_days` permet de dimensionner le pool d'activités (≥ 4/jour + buffer)."""
+    return generate_city_data(
+        city_name, transport_mode=transport_mode, num_days=num_days,
+    )
+
+
+# ─────────────────────────────────────────────
+# Résumé du plan pour le LLM (interpréter les requêtes relatives)
+# ─────────────────────────────────────────────
+
+def _resolve_hotel_budget(constraints: dict) -> dict:
+    """
+    Si l'utilisateur n'a pas explicitement fixé hotel_per_night (None),
+    on en calcule un comme 40 % du budget total / num_days. Ça permet aux
+    voyageurs avec un gros budget d'avoir naturellement accès aux hôtels
+    plus haut de gamme, sans qu'ils aient à le dire explicitement.
+
+    Sémantique : hotel_per_night = prix de CHAMBRE par nuit (pas par tête).
+    Plancher : 50 € (en dessous, aucun hôtel ne rentre généralement).
+    """
+    if constraints.get("hotel_per_night") is not None:
+        return constraints  # explicitly set by user
+    total = constraints.get("total_budget") or 0
+    days = constraints.get("num_days") or 1
+    if total > 0 and days > 0:
+        budget_per_night = max(50, int(total * 0.4 / days))
+        out = dict(constraints)
+        out["hotel_per_night"] = budget_per_night
+        return out
+    return constraints
+
+
+def _build_plan_summary(session_id: str, current: dict) -> Optional[str]:
+    """
+    Construit une description compacte du plan actuel pour aider le LLM à
+    interpréter des requêtes relatives (« plus de culture », « moins d'activités »).
+
+    Exemple de sortie :
+        "14 activités sur 6 jours (~2.3/jour), dont 5 culture, 4 gastro, 3 nature, 2 nightlife"
+    """
+    meta = _store.get_meta(session_id)
+    last_plan = meta.get("last_plan")
+    if not last_plan:
+        return None
+
+    # Reconstituer la liste d'IDs d'activités du plan
+    flat_ids: list[str] = []
+    for entries in last_plan.values():
+        for entry in entries:
+            aid = entry[0] if isinstance(entry, (list, tuple)) else entry
+            flat_ids.append(aid)
+
+    total = len(flat_ids)
+    num_days = len(last_plan)
+    if total == 0 or num_days == 0:
+        return None
+
+    # Récupérer les catégories depuis le city_data caché
+    destination = current.get("destination") or ""
+    transport = current.get("transport_mode") or "foot"
+    city_data = _store.get_city_data(session_id, destination, transport)
+    by_category: dict[str, int] = {}
+    if city_data:
+        acts_by_id = {a["id"]: a for a in city_data.get("activities", [])}
+        for aid in flat_ids:
+            cat = (acts_by_id.get(aid) or {}).get("category")
+            if cat:
+                by_category[cat] = by_category.get(cat, 0) + 1
+
+    cat_str = ", ".join(f"{n} {c}" for c, n in sorted(by_category.items(), key=lambda x: -x[1]))
+    avg = total / num_days
+    summary = f"{total} activités sur {num_days} jours (~{avg:.1f}/jour)"
+    if cat_str:
+        summary += f", dont {cat_str}"
+    return summary
 
 
 # ─────────────────────────────────────────────
@@ -296,10 +426,16 @@ def handle_turn(
     meta = _store.get_meta(session_id)
     pending_field = meta.get("pending_field")
 
+    # Calculer un résumé du plan actuel à passer au LLM pour interpréter
+    # les requêtes relatives ("plus d'activités", "plus de culture").
+    plan_summary = _build_plan_summary(session_id, current)
+
     # 1. Extraction LLM (avec hint sur le champ en attente pour les réponses courtes)
     t_ex = time.time()
     extracted, extract_err = extract_constraints(
-        user_message, current, pending_field=pending_field
+        user_message, current,
+        pending_field=pending_field,
+        plan_summary=plan_summary,
     )
     extraction_ms = int((time.time() - t_ex) * 1000)
     # Filtrer les ré-émissions parasites du LLM (ex: num_travelers=1 ré-écrasé)
@@ -336,6 +472,8 @@ def handle_turn(
 
     # 2. Merge
     merged = merge_constraints(current, extracted)
+    # Si l'utilisateur n'a pas explicité de budget hôtel, on prend 40 % du total / jour
+    merged = _resolve_hotel_budget(merged)
     _store.set(session_id, merged)
 
     # 3. Vérifier les contraintes critiques manquantes (dialog_manager)
@@ -378,7 +516,14 @@ def handle_turn(
     if transport_mode:
         merged["transport_mode"] = transport_mode
         _store.set(session_id, merged)
-    city_data = load_city_data(destination, transport_mode=effective_transport)
+    # Réutiliser le pool d'activités si on l'a déjà généré pour cette session
+    # (sinon chaque tour multi-tours redonne des IDs différents → la stabilité
+    # ne peut pas matcher l'ancien plan).
+    city_data = _store.get_city_data(session_id, destination, effective_transport)
+    if city_data is None:
+        city_data = load_city_data(destination, transport_mode=effective_transport, num_days=int(merged.get("num_days") or 5))
+        if city_data:
+            _store.set_city_data(session_id, destination, effective_transport, city_data)
 
     if not city_data:
         errors.append(f"city_not_found: {destination}")
@@ -430,8 +575,12 @@ def handle_turn(
     # 6. Explication des compromis
     explanation = explain_solution(plan, merged)
 
-    # 7. Narration LLM
-    reply = narrate_plan(user_message, plan, merged, extracted)
+    # 7. Narration LLM (avec compte précédent pour ne pas halluciner le delta)
+    previous_count = None
+    if previous_plan:
+        previous_count = sum(len(v) for v in previous_plan.values())
+    reply = narrate_plan(user_message, plan, merged, extracted,
+                          previous_count=previous_count)
 
     return {
         "reply": reply,
@@ -482,6 +631,7 @@ def handle_form(
 
     # Merge : les valeurs du formulaire écrasent l'état courant
     merged = merge_constraints(current, form_constraints)
+    merged = _resolve_hotel_budget(merged)
     _store.set(session_id, merged)
 
     # Validation : champs critiques
@@ -507,7 +657,12 @@ def handle_form(
         merged["transport_mode"] = transport_mode
         _store.set(session_id, merged)
 
-    city_data = load_city_data(destination, transport_mode=effective_transport)
+    # Cache session pour préserver les IDs entre tours
+    city_data = _store.get_city_data(session_id, destination, effective_transport)
+    if city_data is None:
+        city_data = load_city_data(destination, transport_mode=effective_transport, num_days=int(merged.get("num_days") or 5))
+        if city_data:
+            _store.set_city_data(session_id, destination, effective_transport, city_data)
     if not city_data:
         return {
             "reply": (f"⚠️ Le LLM n'a pas pu générer les données pour "

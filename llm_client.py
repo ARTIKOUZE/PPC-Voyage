@@ -158,6 +158,10 @@ class ExtractedConstraints(BaseModel):
     max_activities_per_day: Optional[int] = Field(None, ge=1, le=8)
     min_activities_per_day: Optional[int] = Field(None, ge=0, le=8)
 
+    # Cibles par catégorie sur tout le voyage (utiles pour "plus de culture", etc.)
+    min_per_category: Optional[dict[str, int]] = None
+    max_per_category: Optional[dict[str, int]] = None
+
     day_start_hour: Optional[int] = Field(None, ge=0, le=23)
     day_end_hour: Optional[int] = Field(None, ge=1, le=24)
 
@@ -186,6 +190,14 @@ class ExtractedConstraints(BaseModel):
                     str(act): int(day)
                     for act, day in v.items()
                     if isinstance(day, (int, float)) and int(day) >= 1
+                }
+                if not v:
+                    continue
+            if k in ("min_per_category", "max_per_category") and isinstance(v, dict):
+                v = {
+                    str(cat).lower(): int(n)
+                    for cat, n in v.items()
+                    if str(cat).lower() in VALID_CATEGORIES and isinstance(n, (int, float)) and int(n) >= 0
                 }
                 if not v:
                     continue
@@ -287,22 +299,53 @@ User: "week-end du 14 août 2026"
 User: "du 5 au 8 septembre 2026"
 → {"start_date":"2026-09-05","end_date":"2026-09-08","num_days":4}
 
-RELATIVE REQUESTS — interpret in context of "Contraintes actuelles":
+RELATIVE REQUESTS — when "Plan actuel" is provided, use the CURRENT AVG/day
+to compute concrete deltas. CRITICAL: the new constraint must ACTUALLY
+constrain compared to current avg, otherwise nothing changes.
 
-User (current preferred_pace=moderate): "Je veux plus d'activités par jour"
+For "plus / encore plus" — bump pace first; emit min_activities_per_day
+ONLY if pace is already intense (it's now soft, no infeasibility risk).
+
+User (Plan actuel : 14/6j ~2.3/jour, pace=relaxed) "plus d'activités"
+→ {"preferred_pace":"moderate"}
+
+User (Plan actuel : 12/3j ~4/jour, pace=moderate) "plus d'activités"
 → {"preferred_pace":"intense"}
 
-User (current preferred_pace=relaxed): "Plus d'activités svp"
-→ {"preferred_pace":"moderate"}
+User (Plan actuel : 13/5j ~2.6/jour, pace=intense) "encore plus d'activités"
+→ {"min_activities_per_day":4}
+(pace already at intense → push the soft floor; round up from current avg)
 
-User (current preferred_pace=intense): "On en a trop, moins d'activités"
-→ {"preferred_pace":"moderate"}
+For "moins / encore moins" — max_activities_per_day MUST be STRICTLY BELOW
+current avg/day, otherwise it doesn't reduce anything. Round DOWN aggressively.
+Never emit max ≥ current avg.
 
-User (current preferred_pace=moderate): "Moins d'activités, on veut prendre notre temps"
-→ {"preferred_pace":"relaxed"}
+User (Plan actuel : 24/4j ~6/jour, pace=intense) "moins d'activités"
+→ {"max_activities_per_day":4,"preferred_pace":"moderate"}
+(6 → 4, real cut)
 
-User (current preferred_pace=intense): "Encore plus d'activités si possible"
-→ {"min_activities_per_day":6}
+User (Plan actuel : 13/5j ~2.6/jour, pace=intense) "moins d'activités"
+→ {"max_activities_per_day":2,"preferred_pace":"moderate"}
+(2.6 → 2. Do NOT emit max=3 — that would NOT constrain since 2.6 < 3.)
+
+User (Plan actuel : 10/5j ~2.0/jour, pace=moderate) "encore moins"
+→ {"max_activities_per_day":1,"preferred_pace":"relaxed"}
+(2 → 1, real cut)
+
+User (Plan actuel : 16/4j ~4/jour, pace=moderate) "moins d'activités on est fatigués"
+→ {"max_activities_per_day":3,"preferred_pace":"relaxed"}
+
+PER-CATEGORY REQUESTS — when the user wants more/less of a specific category:
+
+User (Plan actuel : 12 activités, dont 3 culture, 4 gastro) "je veux plus de culture"
+→ {"min_per_category":{"culture":5}}
+(3 culture → bump to 5, leaves other categories alone)
+
+User (Plan actuel : 14 activités, dont 5 culture, 2 gastro) "plus de gastronomie"
+→ {"min_per_category":{"gastro":4}}
+
+User (Plan actuel : 10 activités, dont 6 culture) "trop de culture"
+→ {"max_per_category":{"culture":3}}
 
 CRITICAL — do not re-emit fields that are NOT mentioned in the user's message,
 even if "Contraintes actuelles" shows a value for them. Re-emitting unchanged
@@ -364,6 +407,7 @@ def extract_constraints(
     current_constraints: Optional[dict] = None,
     max_retries: int = 1,
     pending_field: Optional[str] = None,
+    plan_summary: Optional[str] = None,
 ) -> tuple[dict, Optional[str]]:
     """
     Extrait les contraintes d'un message utilisateur.
@@ -388,9 +432,11 @@ def extract_constraints(
             f"interpret it as the value of that field."
         )
 
+    plan_block = f"\nPlan actuel : {plan_summary}\n" if plan_summary else ""
     user_content = (
-        f"Contraintes actuelles : {json.dumps(current_constraints, ensure_ascii=False)}\n\n"
-        f"Message utilisateur : \"{user_message}\"{hint}\n\n"
+        f"Contraintes actuelles : {json.dumps(current_constraints, ensure_ascii=False)}\n"
+        f"{plan_block}"
+        f"\nMessage utilisateur : \"{user_message}\"{hint}\n\n"
         "Extrais les contraintes modifiées en JSON strict."
     )
 
@@ -411,16 +457,6 @@ def extract_constraints(
             blob = _extract_json_blob(raw)
             data = json.loads(blob)
             extracted = ExtractedConstraints(**data).clean()
-            # Si LLM n'a rien extrait et qu'un champ est attendu, fallback regex
-            if not extracted and pending_field:
-                fb = parse_bare_reply(pending_field, user_message)
-                if fb is not None:
-                    extracted = {pending_field: fb}
-                    # Cohérence : ajouter aussi day_end_hour si on extrait des plages "9h-18h"
-                    if pending_field == "day_start_hour":
-                        end_fb = parse_bare_reply("day_end_hour", user_message)
-                        if end_fb is not None:
-                            extracted["day_end_hour"] = end_fb
             return extracted, None
 
         except (json.JSONDecodeError, ValidationError, TypeError) as e:
@@ -428,109 +464,7 @@ def extract_constraints(
         except Exception as e:
             last_err = f"api error (attempt {attempt}): {e}"
 
-    # En cas d'échec LLM complet, tenter un fallback regex si on a un pending_field
-    if pending_field:
-        fb = parse_bare_reply(pending_field, user_message)
-        if fb is not None:
-            return {pending_field: fb}, None
-
     return {}, last_err
-
-
-# ─────────────────────────────────────────────
-# Fallback regex pour les réponses courtes en multi-tour
-# ─────────────────────────────────────────────
-
-_HOUR_RANGE_RE = re.compile(
-    r"(?:de\s+)?(\d{1,2})\s*h(?:\s*\d{2})?\s*(?:[-àa]|jusqu'?[àa])\s*(\d{1,2})\s*h",
-    re.IGNORECASE,
-)
-_HOUR_SINGLE_RE = re.compile(r"(\d{1,2})\s*h(?:\d{2})?", re.IGNORECASE)
-_INT_RE = re.compile(r"\b(\d{1,5})\b")
-
-
-def parse_bare_reply(field: str, message: str) -> Optional[object]:
-    """
-    Parse déterministe d'une réponse utilisateur courte pour un champ critique.
-    Utilisé en fallback quand le LLM échoue à extraire (ex: réponse "5" à
-    "combien de jours ?").
-
-    Returns:
-        La valeur typée pour le champ, ou None si rien ne matche.
-    """
-    if not message or not isinstance(message, str):
-        return None
-    msg = message.strip()
-
-    if field == "destination":
-        # Prendre la portion non-numérique de la réponse comme nom de ville
-        cleaned = re.sub(r"[^\w\s\-']", " ", msg, flags=re.UNICODE).strip()
-        # Retirer les chiffres et garder les mots restants
-        words = [w for w in cleaned.split() if not w.isdigit() and len(w) >= 2]
-        if not words:
-            return None
-        candidate = " ".join(words).strip()
-        return candidate if len(candidate) >= 2 else None
-
-    if field == "day_start_hour":
-        m = _HOUR_RANGE_RE.search(msg)
-        if m:
-            val = int(m.group(1))
-            if 0 <= val <= 23:
-                return val
-        m = _HOUR_SINGLE_RE.search(msg)
-        if m:
-            val = int(m.group(1))
-            if 0 <= val <= 23:
-                return val
-        m = _INT_RE.search(msg)
-        if m:
-            val = int(m.group(1))
-            if 0 <= val <= 23:
-                return val
-        return None
-
-    if field == "day_end_hour":
-        m = _HOUR_RANGE_RE.search(msg)
-        if m:
-            val = int(m.group(2))
-            if 1 <= val <= 24:
-                return val
-        # Si "à 22h" sans plage, retourner cette valeur
-        m = _HOUR_SINGLE_RE.search(msg)
-        if m:
-            val = int(m.group(1))
-            if 1 <= val <= 24:
-                return val
-        m = _INT_RE.search(msg)
-        if m:
-            val = int(m.group(1))
-            if 1 <= val <= 24:
-                return val
-        return None
-
-    if field == "total_budget":
-        # Chercher d'abord un grand nombre (probablement le budget)
-        nums = [int(x) for x in _INT_RE.findall(msg)]
-        if not nums:
-            return None
-        # Prendre le plus grand entier ≥ 50 (un budget plausible)
-        candidates = [n for n in nums if n >= 50]
-        if candidates:
-            return max(candidates)
-        return None
-
-    if field == "num_days":
-        nums = [int(x) for x in _INT_RE.findall(msg)]
-        if not nums:
-            return None
-        # Prendre le premier entier dans [1, 21]
-        for n in nums:
-            if 1 <= n <= 21:
-                return n
-        return None
-
-    return None
 
 
 # ─────────────────────────────────────────────
@@ -565,47 +499,57 @@ def narrate_plan(
     plan: dict,
     constraints: dict,
     extracted_changes: dict,
+    previous_count: Optional[int] = None,
 ) -> str:
     """Génère la réponse conversationnelle à afficher dans le chat.
-    En cas d'échec LLM, retourne un fallback déterministe pour ne pas bloquer l'UI."""
+    `previous_count` (si fourni) = nombre d'activités du plan précédent,
+    pour que le LLM puisse être honnête sur le delta réel et ne pas
+    halluciner « j'ai ajouté X activités » alors que rien n'a bougé.
+    Aucun fallback : si le LLM échoue, l'exception remonte à l'appelant."""
     plan_summary = _summarize_plan(plan, constraints)
     changes_str = json.dumps(extracted_changes, ensure_ascii=False) if extracted_changes else "aucune"
+
+    # Delta concret pour empêcher l'hallucination du LLM narrateur
+    delta_block = ""
+    if previous_count is not None and plan and plan.get("summary"):
+        new_count = plan["summary"].get("total_activities", 0)
+        delta = new_count - previous_count
+        if delta > 0:
+            delta_block = (
+                f"\nChangement effectif : +{delta} activités "
+                f"({previous_count} → {new_count})."
+            )
+        elif delta < 0:
+            delta_block = (
+                f"\nChangement effectif : {delta} activités "
+                f"({previous_count} → {new_count})."
+            )
+        else:
+            delta_block = (
+                f"\nChangement effectif : AUCUN ({previous_count} activités, identique). "
+                "Mentionne-le honnêtement au lieu de prétendre avoir ajouté/retiré quelque chose. "
+                "Suggère plutôt une autre piste (augmenter l'amplitude horaire, allonger le séjour…)."
+            )
 
     user_content = (
         f"Message utilisateur : \"{user_message}\"\n"
         f"Contraintes modifiées par ce message : {changes_str}\n"
-        f"Résumé du plan : {plan_summary}\n\n"
+        f"Résumé du plan : {plan_summary}"
+        f"{delta_block}\n\n"
         "Réponds en 2-3 phrases max."
     )
 
-    try:
-        resp = chat_with_fallback(
-            messages=[
-                {"role": "system", "content": NARRATION_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.7,
-            max_tokens=400,
-            extra_body=QWEN_NO_THINK,
-        )
-        raw = resp.choices[0].message.content or ""
-        narration = _strip_thinking(raw).strip()
-        if narration:
-            return narration
-    except Exception:
-        pass
-
-    # Fallback déterministe si le LLM n'a rien renvoyé ou a planté
-    if not plan or plan.get("status") == "INFEASIBLE":
-        return ("Je n'ai pas réussi à construire un plan satisfaisant toutes tes "
-                "contraintes. Tu peux essayer d'élargir le budget ou la durée.")
-    summary = plan.get("summary", {})
-    return (
-        f"Voilà ton plan pour {constraints.get('destination', 'la ville')} : "
-        f"{summary.get('total_activities', 0)} activités sur "
-        f"{constraints.get('num_days', '?')} jours, "
-        f"pour {summary.get('total_cost', 0)}€ sur {summary.get('budget', 0)}€."
+    resp = chat_with_fallback(
+        messages=[
+            {"role": "system", "content": NARRATION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.7,
+        max_tokens=400,
+        extra_body=QWEN_NO_THINK,
     )
+    raw = resp.choices[0].message.content or ""
+    return _strip_thinking(raw).strip()
 
 
 # ─────────────────────────────────────────────

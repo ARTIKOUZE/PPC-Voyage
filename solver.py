@@ -106,68 +106,10 @@ class TravelConstraints:
     trip_weekdays: list[int] = field(default_factory=list)
 
 
-# ─────────────────────────────────────────────
-# Base de données d'activités (Rome)
-# ─────────────────────────────────────────────
-
-ROME_ACTIVITIES = [
-    Activity("colosseum", "Colisée", "culture", 2.5, 18, 8, 19, "centro", 10),
-    Activity("vatican", "Musées du Vatican + Chapelle Sixtine", "culture", 3.5, 17, 8, 18, "vatican", 10),
-    Activity("pantheon", "Panthéon", "culture", 1.0, 0, 8, 19, "centro", 8),
-    Activity("forum", "Forum Romain", "culture", 2.0, 16, 8, 19, "centro", 9),
-    Activity("trastevere", "Balade dans le Trastevere", "nature", 2.0, 0, 9, 23, "trastevere", 7),
-    Activity("borghese", "Galerie Borghèse", "culture", 2.0, 15, 9, 19, "borghese", 9),
-    Activity("trevi", "Fontaine de Trevi + Piazza Navona", "culture", 1.5, 0, 7, 23, "centro", 8),
-    Activity("catacombs", "Catacombes de San Callisto", "culture", 1.5, 10, 9, 17, "appia", 6),
-    Activity("cooking_class", "Cours de cuisine italienne", "gastro", 3.0, 65, 10, 14, "trastevere", 7),
-    Activity("food_tour", "Food tour au Testaccio", "gastro", 3.0, 45, 11, 15, "testaccio", 8),
-    Activity("wine_tasting", "Dégustation de vins", "gastro", 2.0, 35, 16, 21, "centro", 6),
-    Activity("villa_borghese", "Parc Villa Borghèse", "nature", 2.0, 0, 7, 20, "borghese", 6),
-    Activity("appian_way", "Via Appia Antica à vélo", "nature", 3.0, 15, 8, 18, "appia", 7),
-    Activity("ostia", "Excursion Ostia Antica", "culture", 4.0, 12, 8, 17, "ostia", 6),
-    Activity("shopping_condotti", "Shopping Via dei Condotti", "shopping", 2.0, 50, 10, 20, "centro", 4),
-    Activity("trastevere_night", "Soirée Trastevere (bars/restos)", "nightlife", 3.0, 40, 19, 24, "trastevere", 7),
-    Activity("piazza_sunset", "Coucher de soleil Pincio", "nature", 1.5, 0, 17, 21, "borghese", 8),
-    Activity("jewish_quarter", "Quartier juif + Ghetto", "culture", 1.5, 0, 9, 18, "centro", 5),
-    Activity("castel_angelo", "Château Saint-Ange", "culture", 2.0, 15, 9, 19, "vatican", 7),
-    Activity("gelato_tour", "Tour des meilleurs gelati", "gastro", 1.5, 15, 12, 22, "centro", 7),
-]
-
-# Temps de trajet entre zones (en minutes)
-TRAVEL_TIMES = {
-    ("centro", "centro"): 10,
-    ("centro", "vatican"): 25,
-    ("centro", "trastevere"): 15,
-    ("centro", "borghese"): 20,
-    ("centro", "appia"): 30,
-    ("centro", "testaccio"): 15,
-    ("centro", "ostia"): 60,
-    ("vatican", "vatican"): 10,
-    ("vatican", "trastevere"): 20,
-    ("vatican", "borghese"): 25,
-    ("vatican", "appia"): 40,
-    ("vatican", "testaccio"): 25,
-    ("vatican", "ostia"): 70,
-    ("trastevere", "trastevere"): 10,
-    ("trastevere", "borghese"): 30,
-    ("trastevere", "appia"): 25,
-    ("trastevere", "testaccio"): 10,
-    ("trastevere", "ostia"): 55,
-    ("borghese", "borghese"): 10,
-    ("borghese", "appia"): 35,
-    ("borghese", "testaccio"): 25,
-    ("borghese", "ostia"): 65,
-    ("appia", "appia"): 10,
-    ("appia", "testaccio"): 20,
-    ("appia", "ostia"): 40,
-    ("testaccio", "testaccio"): 10,
-    ("testaccio", "ostia"): 50,
-    ("ostia", "ostia"): 10,
-}
-
-
 def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Distance en mètres entre deux points GPS (formule haversine)."""
+    """Distance en mètres entre deux points GPS (formule haversine).
+    Utilisée uniquement pour l'affichage des distances dans le plan retourné,
+    JAMAIS comme fallback de la matrice OSRM."""
     R = 6_371_000.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -176,14 +118,6 @@ def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
          + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-
-def get_travel_time(zone_a: str, zone_b: str) -> int:
-    """Retourne le temps de trajet en minutes entre deux zones."""
-    if (zone_a, zone_b) in TRAVEL_TIMES:
-        return TRAVEL_TIMES[(zone_a, zone_b)]
-    if (zone_b, zone_a) in TRAVEL_TIMES:
-        return TRAVEL_TIMES[(zone_b, zone_a)]
-    return 30  # défaut
 
 
 # ─────────────────────────────────────────────
@@ -263,6 +197,7 @@ class TravelPlannerSolver:
         self._add_capacity_constraints()         # Type 4
         self._add_soft_preferences()             # Type 5
         self._add_cardinality_constraints()      # Type 6
+        self._add_meal_time_constraints()        # Restaurants : créneaux déjeuner/dîner
         self._add_travel_penalty()               # Optimisation : minimiser temps de trajet
         self._add_pin_constraints()              # Multi-tours : pin hard des jours non touchés
         self._add_stability_bonus()              # Multi-tours : bonus soft pour le reste
@@ -323,7 +258,9 @@ class TravelPlannerSolver:
         C = self.constraints
 
         # Budget total pour les activités
-        hotel_total = C.hotel_per_night * C.num_days * C.num_travelers
+        # Hôtel = prix de CHAMBRE par nuit (pas multiplié par voyageurs)
+        # Repas = budget par personne par jour
+        hotel_total = C.hotel_per_night * C.num_days
         food_total = C.daily_food_budget * C.num_days * C.num_travelers
         activity_budget = max(0, C.total_budget - hotel_total - food_total)
         self._activity_budget = activity_budget
@@ -554,17 +491,15 @@ class TravelPlannerSolver:
         return ("foot", foot_minutes)
 
     def _travel_minutes(self, a1_id: str, a2_id: str) -> int:
-        """Temps de trajet entre deux activités. Utilise la matrice OSRM si dispo,
-        sinon fallback sur la table de zones hardcodée."""
-        if self.travel_matrix is not None:
-            i = self._act_index.get(a1_id)
-            j = self._act_index.get(a2_id)
-            if i is not None and j is not None:
-                try:
-                    return int(self.travel_matrix[i][j])
-                except (IndexError, TypeError):
-                    pass
-        return get_travel_time(self.activities[a1_id].zone, self.activities[a2_id].zone)
+        """Temps de trajet entre deux activités, depuis la matrice OSRM.
+        Lève si la matrice est absente ou indexable (pas de fallback)."""
+        if self.travel_matrix is None:
+            raise RuntimeError(
+                "travel_matrix obligatoire : aucune valeur fallback n'est tolérée."
+            )
+        i = self._act_index[a1_id]
+        j = self._act_index[a2_id]
+        return int(self.travel_matrix[i][j])
 
     # ── TYPE 4 : Capacité et ressources ─────────────
 
@@ -652,10 +587,14 @@ class TravelPlannerSolver:
         #   - intense : pénalité forte sur le shortfall (remplis bien la journée)
         # Sans cette asymétrie les trois rythmes convergent vers le maximum
         # naturel autorisé par les durées + le budget.
+        # Poids renforcés sur le shortfall : on veut vraiment remplir les jours.
+        # Le shortfall est multiplié par target_jour, donc une journée vide
+        # coûte 3*15=45 (relaxed) à 5*25=125 (intense) — bien plus que tout
+        # bonus de priorité (~10) → le solveur saturera les jours.
         PACE_CONFIG = {
-            "relaxed":  {"target": 3, "short_w": 4,  "over_w": 10},
-            "moderate": {"target": 4, "short_w": 8,  "over_w": 4},
-            "intense":  {"target": 5, "short_w": 12, "over_w": 1},
+            "relaxed":  {"target": 3, "short_w": 15, "over_w": 10},
+            "moderate": {"target": 4, "short_w": 20, "over_w": 4},
+            "intense":  {"target": 5, "short_w": 25, "over_w": 1},
         }
         pace = C.preferred_pace if C.preferred_pace in PACE_CONFIG else "moderate"
         cfg = PACE_CONFIG[pace]
@@ -721,6 +660,15 @@ class TravelPlannerSolver:
         dynamic_max = min(C.max_activities_per_day, int(available_hours / min_act_duration))
         dynamic_max = max(1, dynamic_max)  # au moins 1
 
+        # min_activities_per_day = TARGET soft (pas un plancher hard).
+        # Un plancher hard rend trop facilement le problème INFEASIBLE quand
+        # la ville/le créneau ne permet physiquement pas d'atteindre ce min
+        # (horaires d'ouverture, contraintes repas, temps de trajet…).
+        # Stratégie : on garde un plancher hard à 1 (pas de journée vide),
+        # et tout au-dessus devient un soft target avec pénalité forte.
+        HARD_FLOOR = 1
+        soft_target = max(HARD_FLOOR, int(C.min_activities_per_day))
+
         for d in range(C.num_days):
             day_count = sum(
                 self.assign[a_id, d]
@@ -728,7 +676,18 @@ class TravelPlannerSolver:
                 if (a_id, d) in self.assign
             )
             self.model.add(day_count <= dynamic_max)
-            self.model.add(day_count >= C.min_activities_per_day)
+            self.model.add(day_count >= HARD_FLOOR)
+
+            # Pénalité soft pour ne pas atteindre la cible utilisateur.
+            # Poids 20 = très forte incitation, mais le solveur peut quand
+            # même renvoyer FEASIBLE avec moins si physiquement impossible.
+            if soft_target > HARD_FLOOR:
+                min_shortfall = self.model.new_int_var(
+                    0, soft_target, f"min_short_d{d}"
+                )
+                self.model.add(min_shortfall >= soft_target - day_count)
+                self.model.add(min_shortfall >= 0)
+                self.soft_penalties.append(min_shortfall * 20)
 
         # Min/max par catégorie sur tout le voyage
         categories = set(a.category for a in self.activities.values())
@@ -742,6 +701,87 @@ class TravelPlannerSolver:
                 self.model.add(cat_count <= C.max_per_category[cat])
             if cat in C.min_per_category:
                 self.model.add(cat_count >= C.min_per_category[cat])
+
+    # ── Contraintes des heures de repas (restaurants) ─────────────────
+
+    # Mots-clés qui désignent une activité gastro NON-restaurant
+    # (visite, atelier, dégustation, marché, glacier, café…)
+    _NON_RESTAURANT_KEYWORDS = (
+        "marché", "market", "halles",
+        "tour", "tournée", "tasting", "dégustation",
+        "class", "cours", "atelier", "cooking",
+        "gelato", "glace", "ice cream",
+        "café", "coffee",
+        "vineyard", "winery", "cave",
+        "pub ", "bar à",
+    )
+
+    def _is_restaurant(self, act: Activity) -> bool:
+        """
+        Heuristique : cette activité gastro est-elle un restaurant
+        servant un repas formel (déjeuner ou dîner) ?
+
+        Exclut les activités gastro "non-repas" (marchés, ateliers,
+        dégustations, glaciers…) par mots-clés sur le nom.
+        """
+        if act.category != "gastro":
+            return False
+        name = act.name.lower()
+        if any(kw in name for kw in self._NON_RESTAURANT_KEYWORDS):
+            return False
+        # Repas typique : 1h à 3h
+        return 1.0 <= act.duration_hours <= 3.0
+
+    def _add_meal_time_constraints(self):
+        """
+        Contrainte HARD : tout restaurant sélectionné doit démarrer dans
+        une des deux fenêtres :
+          - Déjeuner : 12h00 → 14h00
+          - Dîner    : 19h30 → 21h30
+
+        Implémentation CP-SAT classique : disjunction sur deux fenêtres
+        temporelles via deux BoolVar (is_lunch / is_dinner) avec
+        `only_enforce_if`. Si l'activité n'est pas assignée, aucune
+        contrainte ne s'applique.
+        """
+        # Slots (1 slot = 30 min, DAY_START = 7h)
+        # 12h = slot 10, 14h = slot 14
+        # 19h30 = slot 25, 21h30 = slot 29
+        LUNCH_START = (12 - self.DAY_START) * 2
+        LUNCH_END = (14 - self.DAY_START) * 2
+        DINNER_START = int((19.5 - self.DAY_START) * 2)
+        DINNER_END = int((21.5 - self.DAY_START) * 2)
+
+        for a_id, act in self.activities.items():
+            if not self._is_restaurant(act):
+                continue
+            for d in range(self.constraints.num_days):
+                if (a_id, d) not in self.assign:
+                    continue
+
+                is_lunch = self.model.new_bool_var(f"lunch_{a_id}_d{d}")
+                is_dinner = self.model.new_bool_var(f"dinner_{a_id}_d{d}")
+
+                # Si assignée : exactement un service (déjeuner XOR dîner)
+                self.model.add(is_lunch + is_dinner == 1).only_enforce_if(
+                    self.assign[a_id, d]
+                )
+
+                # Fenêtre déjeuner : start in [LUNCH_START, LUNCH_END]
+                self.model.add(
+                    self.start[a_id, d] >= LUNCH_START
+                ).only_enforce_if([self.assign[a_id, d], is_lunch])
+                self.model.add(
+                    self.start[a_id, d] <= LUNCH_END
+                ).only_enforce_if([self.assign[a_id, d], is_lunch])
+
+                # Fenêtre dîner : start in [DINNER_START, DINNER_END]
+                self.model.add(
+                    self.start[a_id, d] >= DINNER_START
+                ).only_enforce_if([self.assign[a_id, d], is_dinner])
+                self.model.add(
+                    self.start[a_id, d] <= DINNER_END
+                ).only_enforce_if([self.assign[a_id, d], is_dinner])
 
     # ── Pénalité de trajet (optimisation des distances) ────────────────
 
@@ -772,13 +812,22 @@ class TravelPlannerSolver:
 
     def _add_stability_bonus(self):
         """
-        Bonus SOFT pour conservation du plan précédent. Utile pour les jours
-        explicitement touchés par l'utilisateur : on préfère bouger le moins
-        possible parmi les options compatibles avec sa demande.
+        Bonus SOFT pour conservation du plan précédent.
+
+        Poids dynamique selon le contexte :
+          - Si on n'a pas de pin (touched_days = None, ex: "ajoute X" sans jour
+            spécifié), le solveur a toute liberté → on met un poids ÉLEVÉ (20)
+            pour qu'il ne change que le strict minimum.
+          - Si on a un pin partiel (touched_days = {…}), les jours non touchés
+            sont déjà figés en dur. On garde un poids modéré (8) pour les jours
+            touchés afin de préférer les choix existants quand c'est possible.
+
+        Le poids doit dépasser les bonus de priorité moyens (~10) pour que
+        le solveur ne déplace pas une activité juste pour gagner +2 ailleurs.
         """
         if not self._previous_plan:
             return
-        STABILITY_WEIGHT = 4
+        STABILITY_WEIGHT = 20 if self._touched_days is None else 8
         for day_idx, entries in self._previous_plan.items():
             for act_id, _slot in self._iter_prev_plan(entries):
                 if (act_id, day_idx) in self.assign:
@@ -854,7 +903,7 @@ class TravelPlannerSolver:
         C = self.constraints
         plan = {"days": [], "status": "OPTIMAL" if status == cp_model.OPTIMAL else "FEASIBLE"}
 
-        total_cost = C.hotel_per_night * C.num_days * C.num_travelers
+        total_cost = C.hotel_per_night * C.num_days  # chambre/nuit
         total_cost += C.daily_food_budget * C.num_days * C.num_travelers
 
         for d in range(C.num_days):
@@ -930,7 +979,7 @@ class TravelPlannerSolver:
                 "total_travel_minutes": sum(t["minutes"] for t in transitions),
             })
 
-        hotel_cost = C.hotel_per_night * C.num_days * C.num_travelers
+        hotel_cost = C.hotel_per_night * C.num_days  # chambre/nuit
         food_cost = C.daily_food_budget * C.num_days * C.num_travelers
         activity_cost = total_cost - hotel_cost - food_cost
         remaining = C.total_budget - total_cost
@@ -1063,20 +1112,6 @@ class TravelPlannerSolver:
         return respected, violated
 
 
-def solve_travel_plan(constraints_dict: dict) -> dict:
-    """
-    Point d'entrée legacy : utilise les ROME_ACTIVITIES hardcodées.
-    Conservé pour les tests, préférer solve_with_city_data() en production.
-    """
-    constraints = TravelConstraints(**{
-        k: v for k, v in constraints_dict.items()
-        if k in TravelConstraints.__dataclass_fields__
-    })
-
-    solver = TravelPlannerSolver(ROME_ACTIVITIES, constraints)
-    return solver.solve()
-
-
 def solve_with_city_data(
     constraints_dict: dict,
     city_data: dict,
@@ -1128,8 +1163,10 @@ def solve_with_city_data(
         }
 
     # Vérif amont : le budget couvre-t-il au moins hôtel + repas ?
-    fixed_cost = (constraints.hotel_per_night + constraints.daily_food_budget) \
-        * constraints.num_days * constraints.num_travelers
+    # (hôtel = chambre/nuit, repas = par voyageur/jour)
+    hotel_cost_check = constraints.hotel_per_night * constraints.num_days
+    food_cost_check = constraints.daily_food_budget * constraints.num_days * constraints.num_travelers
+    fixed_cost = hotel_cost_check + food_cost_check
     if fixed_cost > constraints.total_budget:
         deficit = fixed_cost - constraints.total_budget
         return {
@@ -1146,8 +1183,8 @@ def solve_with_city_data(
                 "budget": constraints.total_budget,
                 "remaining_budget": -deficit,
                 "total_activities": 0,
-                "hotel_cost": constraints.hotel_per_night * constraints.num_days * constraints.num_travelers,
-                "food_cost": constraints.daily_food_budget * constraints.num_days * constraints.num_travelers,
+                "hotel_cost": hotel_cost_check,
+                "food_cost": food_cost_check,
                 "activity_cost": 0,
             },
             "stats": {"status_name": "INFEASIBLE_BUDGET"},
@@ -1166,31 +1203,7 @@ def solve_with_city_data(
         previous_plan=previous_plan, touched_days=touched_days,
     )
     result = planner.solve(time_limit_seconds=time_limit_seconds)
-
-    # Si le pinning rend le problème infaisable, on retente sans pin
-    # (fallback : on relâche le pinning pour permettre la modif demandée).
-    if result.get("status") == "INFEASIBLE" and touched_days is not None:
-        planner_unpinned = TravelPlannerSolver(
-            activities, constraints,
-            travel_matrix=travel_matrix, mode=mode, transport_mode=transport_mode,
-            previous_plan=previous_plan, touched_days=None,
-        )
-        result = planner_unpinned.solve(time_limit_seconds=time_limit_seconds)
-        result["pin_fallback"] = True
-
-    # En mode strict, si INFEASIBLE, retenter en mode flexible
-    if result.get("status") == "INFEASIBLE" and mode == "strict":
-        result["message"] = (
-            "Mode strict infaisable avec les préférences données. "
-            "Passage en mode flexible (compromis acceptés)."
-        )
-        planner_flex = TravelPlannerSolver(
-            activities, constraints,
-            travel_matrix=travel_matrix, mode="flexible", transport_mode=transport_mode,
-            previous_plan=previous_plan,
-        )
-        result = planner_flex.solve(time_limit_seconds=time_limit_seconds)
-        result["mode_fallback"] = "strict→flexible"
+    # Pas de retry fallback : un INFEASIBLE est remonté tel quel.
 
     # Enrichir avec infos ville + lat/lon dans chaque activité du plan
     result["city"] = city_data.get("city", {})
@@ -1293,10 +1306,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
 
     if mode == "strict":
         lines.append("Mode strict : seules les activités des catégories préférées ont été sélectionnées.")
-    if solution.get("mode_fallback"):
-        lines.append(
-            "Note : le mode strict était infaisable, le plan a été généré en mode flexible."
-        )
 
     # Budget
     remaining = summary.get("remaining_budget", 0)
@@ -1374,29 +1383,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
     return "\n".join(lines) if lines else "✓ Toutes les contraintes et préférences sont respectées."
 
 
-# ─────────────────────────────────────────────
-# Test rapide
-# ─────────────────────────────────────────────
-
-if __name__ == "__main__":
-    test_constraints = {
-        "destination": "Rome",
-        "num_days": 5,
-        "total_budget": 2000,
-        "num_travelers": 2,
-        "hotel_per_night": 90,
-        "daily_food_budget": 50,
-        "preferred_categories": ["culture", "gastro"],
-        "avoided_categories": ["shopping"],
-        "preferred_pace": "moderate",
-        "must_visit": ["colosseum", "vatican"],
-        "incompatible_pairs": [("vatican", "colosseum")],
-        "prerequisites": {"forum": "colosseum"},
-        "max_activities_per_day": 3,
-        "min_activities_per_day": 2,
-        "min_per_category": {"culture": 3},
-        "max_per_category": {"nightlife": 2},
-    }
-
-    result = solve_travel_plan(test_constraints)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+# Pour tester le solveur, utilise tests/scénarios offline qui fournissent
+# leurs propres données ville (test_solver_scenarios.py). Aucune donnée
+# n'est hardcodée dans ce module.

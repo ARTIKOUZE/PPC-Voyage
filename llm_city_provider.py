@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 from typing import Optional
 
@@ -99,6 +98,9 @@ class LLMCityData(BaseModel):
 CITY_ACTIVITIES_PROMPT = """\
 You are a travel data expert. Generate tourist data for: {city_name}
 
+The user is planning a trip of {num_days} days, so generate {n_activities} activities
+to give the planner a comfortable buffer (≥ 4 per day + extras for refinement).
+
 Return ONLY a valid JSON object. No markdown, no explanations.
 
 Structure:
@@ -109,8 +111,8 @@ Structure:
 }}
 
 RULES:
-- Exactly 12 activities, diverse across the 5 categories.
-- Mix: 4-5 iconic culture (priority 9-10), 2-3 gastro, 2 nature, 1-2 shopping/nightlife if relevant.
+- Generate exactly {n_activities} activities, diverse across the 5 categories — at least 4 per planned day plus a buffer for refinement.
+- Mix proportions: ~40% culture (including a few iconic priority 9-10), ~20% gastro, ~20% nature, ~10% shopping, ~10% nightlife (adjust to what the city actually offers).
 - Activity names in French. id = unique ASCII slug. GPS 4+ decimals. Prices in euros.
 
 REALISTIC duration_hours (use these typical visit times from real tourist averages):
@@ -154,11 +156,21 @@ REALISTIC opening_hour / closing_hour (use real opening hours, not 8-22 by defau
 # Appel LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_llm_for_city(city_name: str, max_retries: int = 1) -> Optional[dict]:
+def _call_llm_for_city(
+    city_name: str,
+    num_days: int = 5,
+    max_retries: int = 1,
+) -> Optional[dict]:
     """Appelle le LLM (primaire + fallback) et retourne le dict JSON brut,
     ou None en cas d'échec total.
-    Timeout par appel : 180 s (génération de 15 activités + 3 hôtels = lourd)."""
-    prompt = CITY_ACTIVITIES_PROMPT.format(city_name=city_name)
+    Dimensionne le pool selon num_days : ≥ 4 activités/jour + buffer."""
+    # Pool : 4 activités/jour + 4 de buffer, plancher 16, plafond 32 (limite LLM)
+    n_activities = max(16, min(32, num_days * 4 + 4))
+    prompt = CITY_ACTIVITIES_PROMPT.format(
+        city_name=city_name,
+        num_days=num_days,
+        n_activities=n_activities,
+    )
 
     last_err = None
     for attempt in range(max_retries + 1):
@@ -207,6 +219,10 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
         seen_names: set[str] = set()
 
         for item in raw_acts:
+            # Filet : LLM peut occasionnellement renvoyer une string au lieu d'un dict.
+            if not isinstance(item, dict):
+                logger.debug("[LLMCity] Item non-dict ignoré: %r", item)
+                continue
             try:
                 act = LLMActivity(**item)
 
@@ -251,8 +267,9 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
                     "transit_exit": act.transit_exit or "",
                     "data_source_detail": "llm",
                 })
-            except (ValidationError, TypeError) as e:
-                logger.debug("[LLMCity] Activité invalide ignorée: %s — %s", item.get("name", "?"), e)
+            except (ValidationError, TypeError, AttributeError) as e:
+                name = item.get("name", "?") if isinstance(item, dict) else repr(item)[:40]
+                logger.debug("[LLMCity] Activité invalide ignorée: %s — %s", name, e)
 
         if len(activities) < 5:
             logger.error("[LLMCity] Trop peu d'activités valides (%d) pour '%s'",
@@ -262,6 +279,9 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
         # Hôtels (optionnel)
         hotels = []
         for item in raw.get("hotels", []) or []:
+            if not isinstance(item, dict):
+                logger.debug("[LLMCity] Hôtel non-dict ignoré: %r", item)
+                continue
             try:
                 h = LLMHotel(**item)
                 hotels.append({
@@ -273,9 +293,9 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
                     "longitude": h.longitude,
                     "description": h.description,
                 })
-            except (ValidationError, TypeError) as e:
-                logger.debug("[LLMCity] Hôtel invalide ignoré: %s — %s",
-                             item.get("name", "?"), e)
+            except (ValidationError, TypeError, AttributeError) as e:
+                name = item.get("name", "?") if isinstance(item, dict) else repr(item)[:40]
+                logger.debug("[LLMCity] Hôtel invalide ignoré: %s — %s", name, e)
 
         return {
             "city": {
@@ -312,47 +332,18 @@ def _assign_zones(activities: list[dict], city_lat: float, city_lon: float) -> N
             act["zone"] = "sud-ouest"
 
 
-_TRANSPORT_SPEEDS_MPH = {"foot": 4000, "bike": 15000, "car": 30000}  # mètres/heure
-
-
 def _compute_travel_matrix(
     activities: list[dict],
     transport_mode: str = "foot",
 ) -> Optional[list[list[int]]]:
-    """Calcule la matrice OSRM, ou une matrice haversine de fallback."""
-    try:
-        from data_provider import osrm_travel_matrix
-        coords = [(a["latitude"], a["longitude"]) for a in activities]
-        matrix = osrm_travel_matrix(coords, transport_mode)
-        if matrix:
-            return matrix
-    except Exception as e:
-        logger.warning("[LLMCity] OSRM error: %s — fallback haversine", e)
-
-    # Fallback : estimation haversine selon mode de transport
-    logger.warning("[LLMCity] Matrice haversine utilisée (OSRM indisponible)")
-    speed_mh = _TRANSPORT_SPEEDS_MPH.get(transport_mode, 4000)
+    """Calcule la matrice OSRM. Pas de fallback : si OSRM échoue, on renvoie
+    None et l'appelant abandonne la génération de la ville."""
+    from data_provider import osrm_travel_matrix
     coords = [(a["latitude"], a["longitude"]) for a in activities]
-    n = len(coords)
-    matrix = []
-    for i in range(n):
-        row = []
-        for j in range(n):
-            if i == j:
-                row.append(0)
-            else:
-                lat1, lon1 = coords[i]
-                lat2, lon2 = coords[j]
-                R = 6_371_000
-                phi1, phi2 = math.radians(lat1), math.radians(lat2)
-                dphi = math.radians(lat2 - lat1)
-                dlam = math.radians(lon2 - lon1)
-                a = (math.sin(dphi / 2) ** 2
-                     + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
-                dist_m = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-                minutes = max(1, round(dist_m / (speed_mh / 60)))
-                row.append(minutes)
-        matrix.append(row)
+    matrix = osrm_travel_matrix(coords, transport_mode)
+    if not matrix:
+        logger.error("[LLMCity] OSRM indisponible — pas de fallback, ville rejetée")
+        return None
     return matrix
 
 
@@ -417,6 +408,7 @@ def _enrich_in_background(activities: list, city_name: str, city_country: str) -
 def generate_city_data(
     city_name: str,
     transport_mode: str = "foot",
+    num_days: int = 5,
 ) -> Optional[dict]:
     """
     Génère (ou charge depuis le cache) les données complètes d'une ville.
@@ -453,7 +445,7 @@ def generate_city_data(
     logger.info("[LLMCity] Génération LLM pour '%s'…", city_name)
 
     # 2. LLM
-    raw = _call_llm_for_city(city_name)
+    raw = _call_llm_for_city(city_name, num_days=num_days)
     if not raw:
         return None
 
