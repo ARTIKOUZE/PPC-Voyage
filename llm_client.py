@@ -363,10 +363,21 @@ The CP-SAT solver has already produced an optimal plan that the user sees in a t
 
 YOUR ROLE:
 - Respond in French, 2–3 sentences maximum, friendly and concise tone.
-- Acknowledge the user's request and mention ONE highlight of the plan (e.g., "I scheduled the Colosseum on day 1" or "Your budget is respected with €120 margin").
+- Acknowledge the user's request and mention ONE highlight of the plan (e.g., "j'ai placé le Colisée le jour 1" or "Votre budget est respecté avec une marge de 120 €").
 - DO NOT recite the plan in text (the user already sees it).
 - If the plan is INFEASIBLE, briefly explain which constraint is likely too tight and suggest a concrete relaxation.
-- If the message was an explanation question ("why this activity on that day?"), give the CP-SAT reason in natural language (e.g., "Because it opens at 9am and it's in the same area as the next activity").
+- If the message was an explanation question ("why this activity on that day?"), give the CP-SAT reason in natural language (e.g., "Parce que ça ouvre à 9h et c'est dans la même zone que la prochaine activité").
+
+RÈGLES STRICTES sur le compte d'activités :
+- Le bloc « Changement effectif » te donne le delta RÉEL (avant → après).
+- Si delta = +N, dis "j'ai ajouté N activité(s)" — JAMAIS le total.
+- Si delta = -N, dis "j'ai retiré N activité(s)".
+- Si delta = 0 ou AUCUN, tu DOIS dire que le plan reste inchangé (mêmes activités, même nombre).
+  Ne JAMAIS écrire "j'ai ajouté/intégré X activités" quand AUCUN changement n'a eu lieu.
+  Explique pourquoi (créneaux saturés, contraintes repas, durées) ET suggère une vraie piste
+  concrète : étendre l'amplitude horaire (ex: "essaye 8h-22h au lieu de 9h-19h"),
+  allonger le séjour, augmenter le budget, ou relâcher une contrainte spécifique.
+- Pour mentionner le total, dis "le plan compte X activités au total" (pas "j'ai ajouté X").
 """
 
 
@@ -557,26 +568,49 @@ def narrate_plan(
         delta = new_count - previous_count
         if delta > 0:
             delta_block = (
-                f"\nChangement effectif : +{delta} activités "
-                f"({previous_count} → {new_count})."
+                f"\n\n=== CHANGEMENT EFFECTIF ===\n"
+                f"Avant : {previous_count} activités. Après : {new_count} activités.\n"
+                f"DELTA : +{delta} activité(s) ajoutée(s).\n"
+                f"Tu DOIS dire 'j'ai ajouté {delta} activité(s)', PAS 'j'ai ajouté {new_count}'.\n"
+                f"Total du plan : {new_count} activités."
             )
         elif delta < 0:
             delta_block = (
-                f"\nChangement effectif : {delta} activités "
-                f"({previous_count} → {new_count})."
+                f"\n\n=== CHANGEMENT EFFECTIF ===\n"
+                f"Avant : {previous_count} activités. Après : {new_count} activités.\n"
+                f"DELTA : {delta} activité(s) retirée(s).\n"
+                f"Tu DOIS dire 'j'ai retiré {abs(delta)} activité(s)'.\n"
+                f"Total du plan : {new_count} activités."
             )
         else:
             delta_block = (
-                f"\nChangement effectif : AUCUN ({previous_count} activités, identique). "
-                "Mentionne-le honnêtement au lieu de prétendre avoir ajouté/retiré quelque chose. "
-                "Suggère plutôt une autre piste (augmenter l'amplitude horaire, allonger le séjour…)."
+                f"\n\n=== CHANGEMENT EFFECTIF : AUCUN ===\n"
+                f"Avant : {previous_count} activités. Après : {previous_count} activités. DELTA : 0.\n"
+                f"INTERDICTION ABSOLUE de dire 'j'ai ajouté/intégré/retiré X activités'.\n"
+                f"Tu DOIS dire que le plan reste inchangé à {previous_count} activités\n"
+                f"et expliquer la cause probable (créneaux horaires saturés, contraintes repas,\n"
+                f"durées des activités). Puis suggère UNE piste concrète : "
+                f"étendre l'amplitude horaire (ex: 8h-22h), allonger le séjour, "
+                f"augmenter le budget, ou modifier les catégories préférées."
+            )
+
+    # Info de saturation du pool d'activités (utile quand l'utilisateur
+    # demande "plus" mais le pool est déjà épuisé).
+    pool_block = ""
+    if plan and plan.get("pool_stats"):
+        ps = plan["pool_stats"]
+        if ps.get("pool_exhausted"):
+            pool_block = (
+                f"\n[SATURATION] Toutes les {ps['pool_size']} activités du pool sont "
+                f"déjà incluses ; impossible d'en ajouter sans changer la durée ou les contraintes."
             )
 
     user_content = (
         f"Message utilisateur : \"{user_message}\"\n"
         f"Contraintes modifiées par ce message : {changes_str}\n"
         f"Résumé du plan : {plan_summary}"
-        f"{delta_block}\n\n"
+        f"{delta_block}"
+        f"{pool_block}\n\n"
         "Réponds en 2-3 phrases max."
     )
 

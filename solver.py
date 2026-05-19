@@ -1274,6 +1274,16 @@ def solve_with_city_data(
             import logging as _log
             _log.getLogger(__name__).warning("[Solver] Transit routing skipped: %s", e)
 
+    # Stats de saturation pour transparence (utile au narrateur + UI)
+    pool_size = len(activities)
+    selected = result.get("summary", {}).get("total_activities", 0)
+    result["pool_stats"] = {
+        "pool_size": pool_size,
+        "selected": selected,
+        "saturation_ratio": round(selected / pool_size, 2) if pool_size else 0,
+        "pool_exhausted": selected >= pool_size,
+    }
+
     return result
 
 
