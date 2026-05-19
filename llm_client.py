@@ -393,6 +393,47 @@ def _extract_json_blob(text: str) -> str:
     return m.group(0) if m else text
 
 
+def parse_json_salvage(blob: str):
+    """
+    Parse JSON ; si une erreur de syntaxe survient au milieu du JSON
+    (typique avec les LLM longs : virgule manquante, troncature), tronque
+    au dernier item de tableau bien fermé AVANT l'erreur et ferme proprement
+    la structure pour récupérer ce qui est parseable.
+
+    Returns: dict/list parsé. Raise la JSONDecodeError d'origine si non récupérable.
+    """
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError as initial_err:
+        err_pos = initial_err.pos
+
+    # Tronquer juste avant l'erreur.
+    prefix = blob[:err_pos]
+    # Le dernier item complet d'un tableau se termine par "}," suivi du début
+    # d'un nouvel item, ou par "}]" en fin de tableau. On cherche la dernière
+    # occurrence de "}," dans le prefix : c'est le dernier item séparé.
+    candidates = []
+    last_comma_after_brace = prefix.rfind("},")
+    if last_comma_after_brace >= 0:
+        candidates.append(last_comma_after_brace + 1)  # position après '}'
+    # Cas où l'erreur survient dès le 2ᵉ item : on cherche le '}' qui
+    # précède l'erreur, suivi seulement d'espaces.
+    last_brace = prefix.rfind("}")
+    if last_brace >= 0:
+        candidates.append(last_brace + 1)
+
+    for truncate_at in candidates:
+        truncated = blob[:truncate_at]
+        # Refermer le tableau + l'objet racine
+        for closing in ("]}", "}", ""):
+            try:
+                return json.loads(truncated + closing)
+            except json.JSONDecodeError:
+                continue
+
+    raise initial_err
+
+
 _PENDING_FIELD_HINTS: dict[str, str] = {
     "destination": "destination (city name)",
     "total_budget": "total_budget (integer, euros)",

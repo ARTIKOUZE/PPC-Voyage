@@ -21,7 +21,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from llm_client import (
-    chat_with_fallback, QWEN_NO_THINK, _extract_json_blob,
+    chat_with_fallback, QWEN_NO_THINK, _extract_json_blob, parse_json_salvage,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,7 +187,9 @@ def _call_llm_for_city(
             )
             raw = resp.choices[0].message.content or ""
             blob = _extract_json_blob(raw)
-            data = json.loads(blob)
+            # parse_json_salvage : récupère le préfixe valide si le LLM coupe
+            # un objet en plein milieu (typique sur réponses très longues).
+            data = parse_json_salvage(blob)
             return data
         except (json.JSONDecodeError, TypeError) as e:
             last_err = f"parse error (attempt {attempt}): {e}"

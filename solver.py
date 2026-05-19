@@ -1212,14 +1212,30 @@ def solve_with_city_data(
     result["start_date"] = constraints.start_date
     result["end_date"] = constraints.end_date
     result["trip_weekdays"] = constraints.trip_weekdays
-    # Sélectionner l'hôtel le moins cher (qui rentre dans le budget hôtel/nuit)
+    # Sélectionner l'hôtel le PLUS CHER dans le budget hôtel/nuit
+    # (objectif : exploiter le budget pour proposer du haut-de-gamme aux gros budgets,
+    # cf. règle 40 % du budget total dans l'orchestrateur).
     hotel_options = city_data.get("hotels") or []
     if hotel_options:
         budget_per_night = constraints.hotel_per_night
         below = [h for h in hotel_options if (h.get("price_per_night") or 0) <= budget_per_night]
-        pool = below if below else hotel_options
-        chosen = min(pool, key=lambda h: h.get("price_per_night") or 0)
+        if below:
+            chosen = max(below, key=lambda h: h.get("price_per_night") or 0)
+        else:
+            # Aucun hôtel sous le budget : prendre le moins cher (tant pis pour le dépassement)
+            chosen = min(hotel_options, key=lambda h: h.get("price_per_night") or 0)
         result["hotel"] = chosen
+
+        # Recaler le summary avec le COÛT RÉEL de l'hôtel choisi
+        # (le solveur avait calculé avec le budget alloué, pas le prix effectif)
+        if result.get("summary"):
+            actual_per_night = int(chosen.get("price_per_night") or 0)
+            actual_hotel_cost = actual_per_night * constraints.num_days
+            previous_hotel_cost = int(result["summary"].get("hotel_cost", 0) or 0)
+            delta = previous_hotel_cost - actual_hotel_cost  # économie sur l'hôtel
+            result["summary"]["hotel_cost"] = actual_hotel_cost
+            result["summary"]["total_cost"] = int(result["summary"].get("total_cost", 0) or 0) - delta
+            result["summary"]["remaining_budget"] = int(result["summary"].get("remaining_budget", 0) or 0) + delta
     if "days" in result:
         act_by_id = {a.id: a for a in activities}
         src_dict_by_id = {a["id"]: a for a in city_data.get("activities", [])}
