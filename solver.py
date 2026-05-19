@@ -1163,8 +1163,21 @@ def solve_with_city_data(
         }
 
     # Vérif amont : le budget couvre-t-il au moins hôtel + repas ?
-    # (hôtel = chambre/nuit, repas = par voyageur/jour)
-    hotel_cost_check = constraints.hotel_per_night * constraints.num_days
+    # Utilise le prix de l'hôtel le moins cher disponible (≤ cap budget), pas le cap lui-même.
+    # Sinon un cap haut (legacy de session précédente) faussement déclare INFEASIBLE.
+    hotel_options_check = city_data.get("hotels") or []
+    cap = constraints.hotel_per_night
+    candidates = [
+        (h.get("price_per_night") or 0)
+        for h in hotel_options_check
+        if (h.get("price_per_night") or 0) <= cap
+    ]
+    if not candidates and hotel_options_check:
+        # Si aucun hôtel ne rentre dans le cap, on utilise le moins cher quand même
+        candidates = [min((h.get("price_per_night") or 0) for h in hotel_options_check)]
+    effective_hotel_price = min(candidates) if candidates else cap
+
+    hotel_cost_check = effective_hotel_price * constraints.num_days
     food_cost_check = constraints.daily_food_budget * constraints.num_days * constraints.num_travelers
     fixed_cost = hotel_cost_check + food_cost_check
     if fixed_cost > constraints.total_budget:
