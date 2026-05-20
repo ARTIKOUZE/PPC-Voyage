@@ -1,39 +1,28 @@
-"""
-Modèles de domaine + utilitaires pour le solveur.
-
-Séparé de solver.py pour garder ce dernier focalisé sur la modélisation CP-SAT
-et les contraintes. Aucune logique de résolution ici.
-"""
+"""Modèles de domaine + utilitaires pour le solveur. Séparé de solver.py pour garder ce dernier focalisé sur la modélisation CP-SAT"""
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-
-# ─────────────────────────────────────────────
-# Dataclasses du domaine
-# ─────────────────────────────────────────────
-
 @dataclass
 class Activity:
     id: str
     name: str
-    category: str          # culture | gastro | nature | shopping | nightlife
+    category: str
     duration_hours: float
-    cost_euros: int        # par personne
-    opening_hour: int      # 0-23
-    closing_hour: int      # 0-23
+    cost_euros: int
+    opening_hour: int
+    closing_hour: int
     zone: str
-    priority_score: int    # 1-10
+    priority_score: int
     available_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
     latitude: float = 0.0
     longitude: float = 0.0
     nearest_stop: str = ""
-    transit_options: list = field(default_factory=list)  # [{"type":"metro","line":"12"}…]
+    transit_options: list = field(default_factory=list)
     transit_exit: str = ""
-    closed_days: list[str] = field(default_factory=list)  # ["monday","tuesday"]
-
+    closed_days: list[str] = field(default_factory=list)
 
 @dataclass
 class TravelConstraints:
@@ -45,38 +34,28 @@ class TravelConstraints:
     num_travelers: int = 1
     hotel_per_night: int = 100
 
-    # Préférences soft
     preferred_categories: list[str] = field(default_factory=list)
     avoided_categories: list[str] = field(default_factory=list)
-    preferred_pace: str = "moderate"  # relaxed | moderate | intense
+    preferred_pace: str = "moderate"
     morning_preference: str = "culture"
 
-    # Contraintes logiques (résolues fuzzy nom→id côté solveur)
     must_visit: list[str] = field(default_factory=list)
     must_avoid: list[str] = field(default_factory=list)
-    must_visit_on_day: dict[str, int] = field(default_factory=dict)  # 1-indexé
+    must_visit_on_day: dict[str, int] = field(default_factory=dict)
     incompatible_pairs: list[tuple[str, str]] = field(default_factory=list)
-    prerequisites: dict[str, str] = field(default_factory=dict)  # {B: A} = A avant B
+    prerequisites: dict[str, str] = field(default_factory=dict)
 
-    # Cardinalité
     max_activities_per_day: int = 6
     min_activities_per_day: int = 1
     max_per_category: dict[str, int] = field(default_factory=dict)
     min_per_category: dict[str, int] = field(default_factory=dict)
 
-    # Fenêtre journalière (None = pas de contrainte)
     day_start_hour: Optional[int] = None
     day_end_hour: Optional[int] = None
 
-    # Dates (ISO YYYY-MM-DD) + jours de la semaine dérivés
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     trip_weekdays: list[int] = field(default_factory=list)
-
-
-# ─────────────────────────────────────────────
-# Utilitaires
-# ─────────────────────────────────────────────
 
 def dict_to_activity(d: dict) -> Activity:
     """Convertit un dict (LLM city provider / data_provider) en Activity."""
@@ -101,10 +80,8 @@ def dict_to_activity(d: dict) -> Activity:
         closed_days=[str(c).lower() for c in closed if isinstance(c, str)],
     )
 
-
 def haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Distance en mètres entre deux points GPS. Utilisée uniquement pour
-    l'affichage (jamais comme fallback du temps de trajet OSRM)."""
+    """Distance en mètres entre deux points GPS. Utilisée uniquement pour l'affichage (jamais comme fallback du temps de trajet OSRM)."""
     R = 6_371_000.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)

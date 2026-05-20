@@ -1,26 +1,4 @@
-"""
-Benchmark CLI : comparaison Langage Naturel (LLM extraction) vs Formulaire
-(contraintes structurées directes).
-
-Pour chaque scénario, exécute les deux pipelines sur la MÊME demande logique
-et mesure :
-  - friction d'entrée (caractères tapés / champs remplis)
-  - latence d'extraction
-  - latence totale du pipeline
-  - couverture d'expression : la contrainte est-elle exprimable côté formulaire ?
-  - équivalence du plan produit (résumé)
-
-Le formulaire est défini comme un sous-ensemble fixé de champs : destination,
-num_days, total_budget, num_travelers, hotel_per_night, daily_food_budget,
-day_start_hour, day_end_hour, preferred_pace, preferred_categories,
-avoided_categories. Les contraintes qui ne sont PAS dans cette liste ne sont
-pas exprimables via le formulaire — c'est l'argument central pour montrer
-l'apport du langage naturel.
-
-Usage :
-  python3 benchmarks/compare_nl_vs_form.py
-  python3 benchmarks/compare_nl_vs_form.py --html benchmarks/nl_vs_form.html
-"""
+"""Benchmark CLI : comparaison Langage Naturel (LLM extraction) vs Formulaire (contraintes structurées directes)."""
 from __future__ import annotations
 
 import argparse
@@ -36,8 +14,6 @@ from llm_client import extract_constraints  # noqa: E402
 from llm_city_provider import generate_city_data  # noqa: E402
 from solver import solve_with_city_data  # noqa: E402
 
-
-# Champs exprimables dans le formulaire (équivalent à FormPanel supprimé)
 FORM_FIELDS = frozenset({
     "destination", "num_days", "total_budget", "num_travelers",
     "hotel_per_night", "daily_food_budget",
@@ -45,7 +21,6 @@ FORM_FIELDS = frozenset({
     "preferred_pace", "preferred_categories", "avoided_categories",
     "start_date", "end_date",
 })
-
 
 SCENARIOS = [
     {
@@ -141,23 +116,16 @@ SCENARIOS = [
     },
 ]
 
-
-# ─────────────────────────────────────────────
-# Outils
-# ─────────────────────────────────────────────
-
 def constraint_coverage(target: dict) -> dict:
     """Retourne quelles clés sont exprimables dans le formulaire et lesquelles ne le sont pas."""
     expr = {k for k in target if k in FORM_FIELDS}
     inexpr = {k for k in target if k not in FORM_FIELDS}
     return {"expressible": sorted(expr), "inexpressible": sorted(inexpr)}
 
-
 def safe_solve(constraints: dict, city_data: dict) -> dict:
     return solve_with_city_data(
         constraints, city_data, time_limit_seconds=10, mode="flexible"
     )
-
 
 def run_nl(scenario: dict, city_data: dict) -> dict:
     """Pipeline NL : extract LLM → merge defaults → solve."""
@@ -166,14 +134,12 @@ def run_nl(scenario: dict, city_data: dict) -> dict:
     extracted, err = extract_constraints(msg)
     t_extract = time.time() - t0
 
-    # Compléter avec valeurs par défaut équivalentes au formulaire
     constraints = dict(extracted)
     constraints.setdefault("num_travelers", 1)
     constraints.setdefault("daily_food_budget", 60)
     constraints.setdefault("day_start_hour", 9)
     constraints.setdefault("day_end_hour", 19)
     constraints.setdefault("preferred_pace", "moderate")
-    # 40 % du budget total pour l'hôtel (cf. orchestrator._resolve_hotel_budget)
     if "hotel_per_night" not in constraints:
         tb = constraints.get("total_budget") or 0
         nd = constraints.get("num_days") or 1
@@ -192,7 +158,6 @@ def run_nl(scenario: dict, city_data: dict) -> dict:
         "plan": plan,
         "input_size": len(msg),
     }
-
 
 def run_form(scenario: dict, city_data: dict) -> dict:
     """Pipeline form : pas d'extraction, complétion défauts → solve."""
@@ -223,18 +188,12 @@ def run_form(scenario: dict, city_data: dict) -> dict:
         "fields_filled": len(form_input),
     }
 
-
-# ─────────────────────────────────────────────
-# Rendu console + HTML
-# ─────────────────────────────────────────────
-
 def fmt_plan(plan: dict) -> str:
     if not plan or plan.get("status") not in ("OPTIMAL", "FEASIBLE"):
         return f"INFEASIBLE/{plan.get('status') if plan else 'NONE'}"
     s = plan.get("summary", {})
     return (f"{s.get('total_activities', 0)} acts · "
             f"{s.get('total_cost', 0)}€/{s.get('budget', 0)}€")
-
 
 def render_console(results: list[dict]):
     print()
@@ -254,7 +213,6 @@ def render_console(results: list[dict]):
         print(f"{scen['id']:<24} {nl_str:<25} {fm_str:<25} {cov_str}")
     print("=" * 95)
     print()
-    # Agrégats
     total_nl_ms = sum(r["nl"]["total_ms"] for r in results)
     total_fm_ms = sum(r["form"]["total_ms"] for r in results)
     total_inexpr = sum(len(r["coverage"]["inexpressible"]) for r in results)
@@ -266,7 +224,6 @@ def render_console(results: list[dict]):
     print(f"  Contraintes inexprimables   : {total_inexpr} sur {n} scénarios")
     print(f"    → uniquement encodables via langage naturel.")
     print()
-
 
 def render_html(results: list[dict], path: Path):
     rows = []
@@ -351,11 +308,6 @@ les champs jusqu'à l'ingérable.
     path.write_text(html, encoding="utf-8")
     print(f"Rapport HTML : {path}")
 
-
-# ─────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--html", type=Path, default=None,
@@ -367,7 +319,6 @@ def main():
     print()
 
     results = []
-    # On cache les city_data par destination pour ne pas faire 2× l'appel LLM
     city_cache: dict[str, dict] = {}
     for scen in SCENARIOS:
         dest = scen["form_input"]["destination"]
@@ -385,7 +336,6 @@ def main():
             if not city_data:
                 continue
 
-        # Construire la cible logique de la requête (union NL + form notion)
         target = dict(scen["form_input"])
         coverage = constraint_coverage(target)
 
@@ -407,7 +357,6 @@ def main():
     render_console(results)
     if args.html:
         render_html(results, args.html)
-
 
 if __name__ == "__main__":
     main()

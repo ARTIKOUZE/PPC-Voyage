@@ -1,16 +1,4 @@
-"""
-Benchmark de l'extraction LLM des contraintes (objectif 4 du sujet).
-
-Charge benchmarks/extraction_dataset.json, lance chaque cas à travers
-llm_client.extract_constraints, compare avec la vérité-terrain via
-constraint_extractor.evaluate_extraction, et produit :
-
-  - un résumé console (F1 global + par champ + par catégorie d'ambiguïté),
-  - un rapport HTML détaillé avec cas par cas (benchmarks/report.html).
-
-Usage :
-  python3 benchmarks/run_extraction_benchmark.py
-"""
+"""Benchmark de l'extraction LLM des contraintes (objectif 4 du sujet). Charge benchmarks/extraction_dataset.json, lance chaque cas à travers"""
 from __future__ import annotations
 
 import json
@@ -21,16 +9,13 @@ from collections import defaultdict
 from html import escape
 from pathlib import Path
 
-# Permettre l'import depuis la racine du projet
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from llm_client import extract_constraints  # noqa: E402
 from constraint_extractor import evaluate_extraction  # noqa: E402
 
-
 DATASET_PATH = Path(__file__).parent / "extraction_dataset.json"
 REPORT_PATH = Path(__file__).parent / "report.html"
-
 
 def aggregate(results: list[dict]) -> dict:
     """Agrège TP/FP/FN sur tous les cas pour produire P/R/F1 global et par champ."""
@@ -72,7 +57,6 @@ def aggregate(results: list[dict]) -> dict:
                         for k, v in sorted(by_category.items())},
     }
 
-
 def render_html(results: list[dict], agg: dict, elapsed: float) -> str:
     g = agg["global"]
     css = """
@@ -104,7 +88,6 @@ def render_html(results: list[dict], agg: dict, elapsed: float) -> str:
     def f1_class(v: float) -> str:
         return "f1-good" if v >= 0.9 else "f1-ok" if v >= 0.7 else "f1-bad"
 
-    # Header + metrics globales
     parts = [
         f"<!doctype html><html><head><meta charset='utf-8'><title>Bench LLM Extraction</title><style>{css}</style></head><body>",
         "<h1>Benchmark d'extraction LLM — Travel Planner</h1>",
@@ -117,7 +100,6 @@ def render_html(results: list[dict], agg: dict, elapsed: float) -> str:
         "</div>",
     ]
 
-    # Tableau par catégorie d'ambiguïté
     parts.append("<h2>F1 par catégorie d'ambiguïté</h2><table><tr><th>Catégorie</th><th>TP</th><th>FP</th><th>FN</th><th>Précision</th><th>Rappel</th><th>F1</th></tr>")
     for cat, v in agg["by_category"].items():
         p, r, f = v["metrics"]
@@ -125,7 +107,6 @@ def render_html(results: list[dict], agg: dict, elapsed: float) -> str:
                      f"<td>{p:.2f}</td><td>{r:.2f}</td><td class='{f1_class(f)}'>{f:.2f}</td></tr>")
     parts.append("</table>")
 
-    # Tableau par champ extrait
     parts.append("<h2>F1 par champ extrait</h2><table><tr><th>Champ</th><th>TP</th><th>FP</th><th>FN</th><th>Précision</th><th>Rappel</th><th>F1</th></tr>")
     for field, v in agg["by_field"].items():
         p, r, f = v["metrics"]
@@ -133,7 +114,6 @@ def render_html(results: list[dict], agg: dict, elapsed: float) -> str:
                      f"<td>{p:.2f}</td><td>{r:.2f}</td><td class='{f1_class(f)}'>{f:.2f}</td></tr>")
     parts.append("</table>")
 
-    # Détail cas par cas
     parts.append("<h2>Cas par cas</h2>")
     for r in results:
         case = r["case"]
@@ -144,7 +124,6 @@ def render_html(results: list[dict], agg: dict, elapsed: float) -> str:
         parts.append(f"<h3>{case['id']} <span class='tag'>{case['category']}</span> "
                      f"<span class='small'>F1={ev['f1']:.2f} · ⏱ {r.get('elapsed_ms',0):.0f}ms</span></h3>")
         parts.append(f"<div class='msg'>« {escape(case['message'])} »</div>")
-        # Mismatch summary
         if not all_match:
             mismatches = []
             for field, det in ev["details"].items():
@@ -162,7 +141,6 @@ def render_html(results: list[dict], agg: dict, elapsed: float) -> str:
 
     parts.append("</body></html>")
     return "".join(parts)
-
 
 def main():
     with DATASET_PATH.open() as f:
@@ -217,7 +195,6 @@ def main():
 
     REPORT_PATH.write_text(render_html(results, agg, elapsed), encoding="utf-8")
     print(f"\nRapport HTML : {REPORT_PATH}")
-
 
 if __name__ == "__main__":
     main()

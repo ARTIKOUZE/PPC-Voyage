@@ -1,16 +1,4 @@
-"""
-Génération dynamique de données de ville via le LLM.
-
-Le LLM connaît toutes les attractions touristiques du monde.
-On lui demande de produire un JSON structuré pour n'importe quelle ville,
-puis on calcule la matrice de trajets via OSRM.
-
-Pipeline :
-  1. Cache local (TTL 30 jours) — évite de re-générer à chaque session
-  2. LLM → JSON des activités + coordonnées GPS de la ville
-  3. OSRM → matrice de temps de trajet à pied
-  4. Assignation des zones géographiques (quadrants)
-"""
+"""Génération dynamique de données de ville via le LLM. Le LLM connaît toutes les attractions touristiques du monde."""
 from __future__ import annotations
 
 import json
@@ -26,7 +14,6 @@ from llm_client import (
 
 logger = logging.getLogger(__name__)
 
-
 def _norm(name: str) -> str:
     """Normalise un nom d'activité pour la déduplication : minuscules, sans accents, sans ponctuation."""
     import unicodedata
@@ -35,24 +22,7 @@ def _norm(name: str) -> str:
     name = re.sub(r"[^\w\s]", " ", name)
     return re.sub(r"\s+", " ", name).strip()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Cache
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Cache désactivé : chaque requête appelle le LLM (données toujours fraîches,
-# fonctionne pour n'importe quelle ville sans pré-cache).
-_cache = None
-_CACHE_AVAILABLE = False
-TTL_LLM_CITY = 0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Schémas Pydantic
-# ─────────────────────────────────────────────────────────────────────────────
-
 VALID_CATEGORIES = {"culture", "gastro", "nature", "shopping", "nightlife"}
-
 
 class LLMActivity(BaseModel):
     id: str
@@ -67,13 +37,12 @@ class LLMActivity(BaseModel):
     priority_score: int = Field(ge=1, le=10)
     confidence: float = Field(ge=0.0, le=1.0, default=0.85)
     address: str = ""
-    nearest_stop: str = ""          # nom de l'arrêt le plus proche
-    transit_options: list = Field(default_factory=list)  # [{type, line}, ...]
+    nearest_stop: str = ""
+    transit_options: list = Field(default_factory=list)
     transit_exit: str = ""
 
     def clean_category(self) -> str:
         return self.category if self.category in VALID_CATEGORIES else "culture"
-
 
 class LLMHotel(BaseModel):
     name: str
@@ -84,16 +53,10 @@ class LLMHotel(BaseModel):
     longitude: float = Field(ge=-180.0, le=180.0)
     description: str = ""
 
-
 class LLMCityData(BaseModel):
     city: dict
     activities: list[LLMActivity]
     hotels: list[LLMHotel] = Field(default_factory=list)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Prompt
-# ─────────────────────────────────────────────────────────────────────────────
 
 CITY_ACTIVITIES_PROMPT = """\
 You are a travel data expert. Generate tourist data for: {city_name}
@@ -151,20 +114,12 @@ REALISTIC opening_hour / closing_hour (use real opening hours, not 8-22 by defau
 - Be CONCISE: no extra fields, no commentary. Output the JSON and stop.
 """
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Appel LLM
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _call_llm_for_city(
     city_name: str,
     num_days: int = 5,
     max_retries: int = 1,
 ) -> Optional[dict]:
-    """Appelle le LLM (primaire + fallback) et retourne le dict JSON brut,
-    ou None en cas d'échec total.
-    Dimensionne le pool selon num_days : ≥ 4 activités/jour + buffer."""
-    # Pool : 4 activités/jour + 4 de buffer, plancher 16, plafond 32 (limite LLM)
+    """Appelle le LLM (primaire + fallback) et retourne le dict JSON brut, ou None en cas d'échec total."""
     n_activities = max(16, min(32, num_days * 4 + 4))
     prompt = CITY_ACTIVITIES_PROMPT.format(
         city_name=city_name,
@@ -187,8 +142,6 @@ def _call_llm_for_city(
             )
             raw = resp.choices[0].message.content or ""
             blob = _extract_json_blob(raw)
-            # parse_json_salvage : récupère le préfixe valide si le LLM coupe
-            # un objet en plein milieu (typique sur réponses très longues).
             data = parse_json_salvage(blob)
             return data
         except (json.JSONDecodeError, TypeError) as e:
@@ -201,7 +154,6 @@ def _call_llm_for_city(
     logger.error("[LLMCity] Échec après %d tentatives pour '%s': %s",
                  max_retries + 1, city_name, last_err)
     return None
-
 
 def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
     """Valide le JSON LLM et retourne un dict propre pour le solveur."""
@@ -221,25 +173,21 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
         seen_names: set[str] = set()
 
         for item in raw_acts:
-            # Filet : LLM peut occasionnellement renvoyer une string au lieu d'un dict.
             if not isinstance(item, dict):
                 logger.debug("[LLMCity] Item non-dict ignoré: %r", item)
                 continue
             try:
                 act = LLMActivity(**item)
 
-                # Dédupliquer par ID
                 act_id = act.id
                 if act_id in seen_ids:
                     act_id = f"{act_id}_{len(seen_ids)}"
                 seen_ids.add(act_id)
 
-                # Dédupliquer par nom normalisé (évite "Tour Eiffel" et "Tour Eiffel - sommet")
                 norm_name = _norm(act.name)
                 if norm_name in seen_names:
                     logger.debug("[LLMCity] Doublon de nom ignoré: '%s'", act.name)
                     continue
-                # Vérifier aussi si un nom existant est un sous-ensemble (préfixe ≥ 6 chars)
                 if any(norm_name.startswith(s[:6]) and abs(len(norm_name) - len(s)) < 15
                        for s in seen_names):
                     logger.debug("[LLMCity] Nom trop proche d'un existant, ignoré: '%s'", act.name)
@@ -278,7 +226,6 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
                          len(activities), city_name)
             return None
 
-        # Hôtels (optionnel)
         hotels = []
         for item in raw.get("hotels", []) or []:
             if not isinstance(item, dict):
@@ -315,11 +262,6 @@ def _validate_and_clean(raw: dict, city_name: str) -> Optional[dict]:
         logger.error("[LLMCity] Validation échouée pour '%s': %s", city_name, e)
         return None
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# OSRM + Zones
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _assign_zones(activities: list[dict], city_lat: float, city_lon: float) -> None:
     for act in activities:
         dlat = act["latitude"] - city_lat
@@ -333,137 +275,69 @@ def _assign_zones(activities: list[dict], city_lat: float, city_lon: float) -> N
         else:
             act["zone"] = "sud-ouest"
 
+_OSRM_SERVERS = {
+    "foot": "https://routing.openstreetmap.de/routed-foot",
+    "car": "http://router.project-osrm.org",
+    "bike": "https://routing.openstreetmap.de/routed-bike",
+}
+
+def _osrm_travel_matrix(
+    coordinates: list[tuple[float, float]],
+    mode: str = "foot",
+) -> Optional[list[list[int]]]:
+    """Matrice de temps de trajet OSRM (minutes) entre paires de coordonnees."""
+    import requests
+    if len(coordinates) < 2:
+        return None
+    base = _OSRM_SERVERS.get(mode, _OSRM_SERVERS["foot"])
+    coords_str = ";".join(f"{lon},{lat}" for lat, lon in coordinates)
+    url = f"{base}/table/v1/driving/{coords_str}"
+    try:
+        resp = requests.get(url, params={"annotations": "duration"}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") == "Ok" and data.get("durations"):
+            return [
+                [max(1, round(cell / 60)) if cell is not None else 30 for cell in row]
+                for row in data["durations"]
+            ]
+    except Exception as e:
+        logger.error("[OSRM] Matrix error: %s", e)
+    return None
 
 def _compute_travel_matrix(
     activities: list[dict],
     transport_mode: str = "foot",
 ) -> Optional[list[list[int]]]:
-    """Calcule la matrice OSRM. Pas de fallback : si OSRM échoue, on renvoie
-    None et l'appelant abandonne la génération de la ville."""
-    from data_provider import osrm_travel_matrix
+    """Matrice OSRM sans fallback : echec OSRM => ville rejetee."""
     coords = [(a["latitude"], a["longitude"]) for a in activities]
-    matrix = osrm_travel_matrix(coords, transport_mode)
+    matrix = _osrm_travel_matrix(coords, transport_mode)
     if not matrix:
         logger.error("[LLMCity] OSRM indisponible — pas de fallback, ville rejetée")
         return None
     return matrix
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Point d'entrée public
-# ─────────────────────────────────────────────────────────────────────────────
-
-_ENRICHMENT_FIELDS = (
-    "opening_hours", "flexible_hours", "closed_days",
-    "price_info", "student_discount", "student_cost_euros",
-    "last_entry_before_close_minutes",
-    "address", "nearest_stop", "transit_options", "transit_exit",
-    "opening_hour", "closing_hour", "cost_euros",
-    "data_confidence", "data_source",
-)
-
-
-def _apply_enrichment_cache(data: dict, city_name: str) -> bool:
-    """Merge le cache d'enrichissement activity_info dans city_data. Non-bloquant."""
-    try:
-        import re as _re
-        from activity_info_service import _load_cache as _ai_cache
-        city_key = _re.sub(r"[^\w]", "_", city_name.lower())
-        cached = _ai_cache(city_key)
-        if not cached:
-            return False
-        enriched_by_id = {k: v for k, v in cached.items() if not k.startswith("_")}
-        if not enriched_by_id:
-            return False
-        applied = 0
-        for act in data.get("activities", []):
-            e = enriched_by_id.get(act["id"])
-            if e:
-                for f in _ENRICHMENT_FIELDS:
-                    if f in e:
-                        act[f] = e[f]
-                applied += 1
-        if applied:
-            data["data_source"] = data.get("data_source", "llm+osrm") + "+enriched"
-            logger.info("[LLMCity] '%s' — %d activités enrichies depuis cache", city_name, applied)
-        return applied > 0
-    except Exception as e:
-        logger.debug("[LLMCity] _apply_enrichment_cache: %s", e)
-        return False
-
-
-def _enrich_in_background(activities: list, city_name: str, city_country: str) -> None:
-    """Lance l'enrichissement (horaires, prix, metro…) dans un thread daemon."""
-    import threading, copy
-
-    def _run():
-        try:
-            from activity_info_service import enrich_activities_batch
-            enrich_activities_batch(copy.deepcopy(activities), city_name, city_country)
-            logger.info("[LLMCity] Enrichissement background terminé pour '%s'", city_name)
-        except Exception as exc:
-            logger.warning("[LLMCity] Enrichissement background échoué pour '%s': %s", city_name, exc)
-
-    threading.Thread(target=_run, daemon=True, name=f"enrich-{city_name}").start()
-
 
 def generate_city_data(
     city_name: str,
     transport_mode: str = "foot",
     num_days: int = 5,
 ) -> Optional[dict]:
-    """
-    Génère (ou charge depuis le cache) les données complètes d'une ville.
-
-    Retourne un dict compatible avec le solveur :
-        {"city": {...}, "activities": [...], "travel_matrix": [[...]],
-         "hotels": [...], "transport_mode": "foot", ...}
-    ou None en cas d'échec.
-
-    L'enrichissement (horaires réels, prix, stations de métro…) tourne en background
-    et est appliqué dès le prochain appel via le cache activity_info.
-    """
-    base_key = f"llm_city_{city_name.lower().replace(' ', '_')}"
-    cache_key = base_key if transport_mode == "foot" else f"{base_key}_{transport_mode}"
-    city_country = ""
-
-    # 1. Cache LLM ville
-    if _CACHE_AVAILABLE and _cache:
-        cached = _cache.get(cache_key)
-        if cached:
-            logger.info("[LLMCity] '%s' chargée depuis le cache (%d activités)",
-                        city_name, len(cached.get("activities", [])))
-            city_country = cached.get("city", {}).get("country", "")
-            # Appliquer l'enrichissement depuis son propre cache si disponible
-            enriched = _apply_enrichment_cache(cached, city_name)
-            if enriched and _CACHE_AVAILABLE and _cache:
-                # Persister la version enrichie pour éviter de re-merger à chaque appel
-                _cache.set(cache_key, cached, ttl_hours=TTL_LLM_CITY)
-            elif not enriched:
-                # Pas encore de cache enrichissement → lancer en background
-                _enrich_in_background(cached.get("activities", []), city_name, city_country)
-            return cached
-
+    """Genere en direct (LLM + OSRM) les donnees completes d'une ville."""
     logger.info("[LLMCity] Génération LLM pour '%s'…", city_name)
 
-    # 2. LLM
     raw = _call_llm_for_city(city_name, num_days=num_days)
     if not raw:
         return None
 
-    # 3. Validation
     data = _validate_and_clean(raw, city_name)
     if not data:
         return None
 
     city_lat = data["city"]["latitude"]
     city_lon = data["city"]["longitude"]
-    city_country = data["city"].get("country", "")
 
-    # 4. Zones
     _assign_zones(data["activities"], city_lat, city_lon)
 
-    # 5. Matrice de trajets selon le mode de transport
     matrix = _compute_travel_matrix(data["activities"], transport_mode)
     if not matrix:
         return None
@@ -478,13 +352,5 @@ def generate_city_data(
         "high_confidence_count": sum(1 for c in confs if c >= 0.80),
         "total": len(data["activities"]),
     }
-
-    # 6. Cache immédiat (sans enrichissement)
-    if _CACHE_AVAILABLE and _cache:
-        _cache.set(cache_key, data, ttl_hours=TTL_LLM_CITY)
-        logger.info("[LLMCity] '%s' mise en cache (%d activités)", city_name, len(data["activities"]))
-
-    # 7. Enrichissement en background (station métro, horaires, prix)
-    _enrich_in_background(data["activities"], city_name, city_country)
 
     return data

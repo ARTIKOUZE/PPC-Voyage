@@ -1,17 +1,8 @@
-"""
-Génération de l'explication des compromis d'un plan CP-SAT.
-
-Séparé de solver.py : c'est de la présentation utilisateur, pas de la
-modélisation CP. Le solveur retourne `respected_constraints` et
-`violated_soft_constraints` (calculés par son audit) ; cette fonction les
-combine avec quelques métriques (budget, rythme, catégories) en un texte
-français lisible.
-"""
+"""Génération de l'explication des compromis d'un plan CP-SAT.
+Séparé de solver.py : c'est de la présentation utilisateur, pas de la"""
 from __future__ import annotations
 
-
 _PACE_TARGET = {"relaxed": 2, "moderate": 3, "intense": 4}
-
 
 def explain_solution(solution: dict, constraints: dict) -> str:
     """Texte d'explication des compromis. Vide-friendly et INFEASIBLE-aware."""
@@ -40,7 +31,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
             "ont été sélectionnées."
         )
 
-    # Budget
     remaining = summary.get("remaining_budget", 0)
     total_cost = summary.get("total_cost", 0)
     budget = summary.get("budget", 0)
@@ -51,7 +41,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
     else:
         lines.append(f"Budget respecté : {total_cost} € / {budget} € ({remaining} € de marge).")
 
-    # Rythme moyen vs cible
     num_days = len(days)
     total_acts = sum(len(d.get("activities", [])) for d in days)
     avg = total_acts / num_days if num_days else 0
@@ -65,7 +54,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
             f"Cause probable : créneaux ou budget."
         )
 
-    # Catégories préférées
     selected_cats = [a["category"] for d in days for a in d.get("activities", [])]
     for cat in constraints.get("preferred_categories", []):
         count = selected_cats.count(cat)
@@ -77,7 +65,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
         else:
             lines.append(f"✓ {count} activité(s) « {cat} » planifiée(s).")
 
-    # Catégories évitées présentes
     for cat in constraints.get("avoided_categories", []):
         count = selected_cats.count(cat)
         if count > 0:
@@ -86,7 +73,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
                 "(nécessaires pour le minimum par jour)."
             )
 
-    # Must-visit manquantes
     selected_ids = {a["id"] for d in days for a in d.get("activities", [])}
     for act_id in constraints.get("must_visit", []):
         if act_id not in selected_ids:
@@ -95,7 +81,6 @@ def explain_solution(solution: dict, constraints: dict) -> str:
                 "et horaires."
             )
 
-    # Violations soft remontées par l'audit (sans doublon avec ce qu'on a déjà dit)
     for v in solution.get("violated_soft_constraints", []):
         if not any(v in line for line in lines):
             lines.append(f"⚠ {v}")

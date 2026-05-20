@@ -1,27 +1,8 @@
-"""
-Gestionnaire de dialogue multi-tour pour la complétion des contraintes.
-
-Responsabilités :
-  1. Vérifier que les contraintes critiques (destination, budget, durée) sont présentes
-  2. Générer des questions précises si une contrainte est manquante ou vague
-  3. Boucler jusqu'à ce que toutes les contraintes critiques soient remplies
-  4. Détecter les expressions floues et demander une clarification
-
-Usage typique :
-    from dialog_manager import next_question, is_complete
-
-    question = next_question(constraints, vague_fields)
-    if question:
-        # Renvoyer la question à l'utilisateur
-    else:
-        # Lancer le solveur
-"""
+"""Gestionnaire de dialogue multi-tour pour la complétion des contraintes.
+Responsabilités :"""
 from __future__ import annotations
 
 from typing import Optional
-
-
-# ─── Contraintes critiques et leurs questions ─────────────────────────────
 
 CRITICAL_FIELDS: dict[str, str] = {
     "destination": "Tu veux partir où ?",
@@ -34,7 +15,6 @@ CRITICAL_FIELDS: dict[str, str] = {
     ),
 }
 
-# Questions pour clarifier les valeurs vagues
 _VAGUE_CLARIFICATIONS: dict[str, str] = {
     "total_budget": (
         "Tu m'as parlé de budget, mais j'ai besoin d'un montant précis. "
@@ -60,7 +40,6 @@ _VAGUE_CLARIFICATIONS: dict[str, str] = {
     ),
 }
 
-# Labels humains pour les messages de récapitulatif
 _FIELD_LABELS: dict[str, str] = {
     "destination": "la destination",
     "total_budget": "le budget",
@@ -70,13 +49,8 @@ _FIELD_LABELS: dict[str, str] = {
     "day_end_hour": "l'heure de fin de journée",
 }
 
-
-# ─── Validation des valeurs critiques ─────────────────────────────────────
-
 def _is_missing(field: str, value) -> bool:
-    """
-    Retourne True si la valeur est absente ou invalide pour un champ critique.
-    """
+    """Retourne True si la valeur est absente ou invalide pour un champ critique."""
     if value is None:
         return True
 
@@ -106,75 +80,37 @@ def _is_missing(field: str, value) -> bool:
 
     return False
 
-
-# ─── API publique ──────────────────────────────────────────────────────────
-
 def get_missing_critical(constraints: dict) -> list[str]:
-    """
-    Retourne la liste des champs critiques manquants ou invalides.
-
-    Args:
-        constraints: état courant des contraintes (dict plat du solveur)
-
-    Returns:
-        Liste de noms de champs critiques non satisfaits.
-    """
+    """Retourne la liste des champs critiques manquants ou invalides.
+    Args:"""
     return [
         field
         for field in CRITICAL_FIELDS
         if _is_missing(field, constraints.get(field))
     ]
 
-
 def is_complete(constraints: dict) -> bool:
-    """
-    Retourne True si toutes les contraintes critiques sont présentes et valides.
-    Le solveur peut être lancé.
-    """
+    """Retourne True si toutes les contraintes critiques sont présentes et valides.
+    Le solveur peut être lancé."""
     return len(get_missing_critical(constraints)) == 0
 
-
 def generate_question(field: str, vague: bool = False) -> str:
-    """
-    Génère la question à poser pour obtenir la valeur d'un champ critique.
-
-    Args:
-        field: nom du champ manquant
-        vague: True si le champ a été mentionné de façon floue (demander clarification)
-
-    Returns:
-        Question en langage naturel (français).
-    """
+    """Génère la question à poser pour obtenir la valeur d'un champ critique.
+    Args:"""
     if vague and field in _VAGUE_CLARIFICATIONS:
         return _VAGUE_CLARIFICATIONS[field]
     return CRITICAL_FIELDS.get(field, f"Peux-tu préciser {field} ?")
-
 
 def next_question(
     constraints: dict,
     vague_fields: Optional[dict[str, bool]] = None,
 ) -> Optional[str]:
-    """
-    Retourne la prochaine question à poser, ou None si tout est complet.
-
-    Priorité :
-      1. Contraintes critiques complètement absentes
-      2. Contraintes critiques présentes mais avec une valeur vague
-
-    Args:
-        constraints: état courant des contraintes (dict plat)
-        vague_fields: {field: True} pour les champs détectés comme flous
-                      (provenant de constraint_extractor.detect_vague_fields)
-
-    Returns:
-        Question en français, ou None si le solveur peut être lancé.
-    """
-    # Priorité 1 : champs critiques manquants
+    """Retourne la prochaine question à poser, ou None si tout est complet.
+    Priorité :"""
     missing = get_missing_critical(constraints)
     if missing:
         return generate_question(missing[0])
 
-    # Priorité 2 : champs critiques présents mais valeurs vagues
     if vague_fields:
         for field in CRITICAL_FIELDS:
             if vague_fields.get(field) and _is_missing(field, constraints.get(field)):
@@ -182,12 +118,9 @@ def next_question(
 
     return None
 
-
 def format_missing_summary(constraints: dict) -> str:
-    """
-    Retourne un message récapitulatif des informations manquantes.
-    Utile pour le débogage ou l'affichage dans les logs.
-    """
+    """Retourne un message récapitulatif des informations manquantes.
+    Utile pour le débogage ou l'affichage dans les logs."""
     missing = get_missing_critical(constraints)
     if not missing:
         return "Toutes les contraintes critiques sont présentes."
@@ -195,11 +128,8 @@ def format_missing_summary(constraints: dict) -> str:
     labels = [_FIELD_LABELS.get(f, f) for f in missing]
     return f"Informations manquantes : {', '.join(labels)}."
 
-
 def format_constraints_status(constraints: dict) -> str:
-    """
-    Affiche l'état détaillé de chaque contrainte critique.
-    """
+    """Affiche l'état détaillé de chaque contrainte critique."""
     lines = ["État des contraintes critiques :"]
     for field, question in CRITICAL_FIELDS.items():
         value = constraints.get(field)
@@ -209,9 +139,6 @@ def format_constraints_status(constraints: dict) -> str:
             lines.append(f"  ✓ {_FIELD_LABELS.get(field, field)} : {value!r}")
     return "\n".join(lines)
 
-
-# ─── Test ──────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     print("=== Test dialog_manager ===\n")
 
@@ -220,7 +147,7 @@ if __name__ == "__main__":
         ({"destination": "Rome"}, None),
         ({"destination": "Rome", "total_budget": 2000}, None),
         ({"destination": "Rome", "total_budget": 2000, "num_days": 5}, None),
-        ({"destination": "Rome", "num_days": 5}, {"total_budget": True}),  # vague budget
+        ({"destination": "Rome", "num_days": 5}, {"total_budget": True}),
     ]
 
     for constraints, vague in test_states:

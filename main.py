@@ -1,24 +1,4 @@
-"""
-Interface conversationnelle CLI du planificateur de voyage (LLM + CP-SAT).
-
-Usage :
-    python main.py [--mode flexible|strict] [--session <id>]
-
-Flux :
-  1. L'utilisateur décrit son voyage en langage naturel
-  2. Le LLM extrait les contraintes
-  3. Le dialog_manager demande les infos manquantes (destination, budget, durée)
-  4. Dès que les contraintes critiques sont complètes, le solveur CP-SAT génère le plan
-  5. La réponse est affichée avec un récapitulatif et l'explication des compromis
-
-Commandes spéciales :
-  /reset      — Réinitialise la session (nouvelle conversation)
-  /state      — Affiche l'état courant des contraintes
-  /explain    — Réaffiche l'explication du dernier plan
-  /mode       — Bascule entre strict et flexible
-  /eval <msg> — Évalue l'extraction LLM sur un message (debug)
-  /quit       — Quitte le programme
-"""
+"""Interface conversationnelle CLI du planificateur de voyage (LLM + CP-SAT). Usage :"""
 from __future__ import annotations
 
 import argparse
@@ -32,20 +12,14 @@ from dialog_manager import format_constraints_status, is_complete
 from constraint_extractor import extract_structured_constraints, evaluate_extraction
 from solver import explain_solution
 
-
-# ─── Affichage ─────────────────────────────────────────────────────────────
-
 WIDTH = 80
-
 
 def _hr(char: str = "─") -> str:
     return char * WIDTH
 
-
 def _wrap(text: str, indent: int = 2) -> str:
     prefix = " " * indent
     return textwrap.fill(text, width=WIDTH - indent, initial_indent=prefix, subsequent_indent=prefix)
-
 
 def print_banner():
     print(_hr("═"))
@@ -53,7 +27,6 @@ def print_banner():
     print("  Tapez votre demande en langage naturel, ou /help pour l'aide.")
     print(_hr("═"))
     print()
-
 
 def print_help():
     print(_hr())
@@ -66,7 +39,6 @@ def print_help():
     print("  /help       Affiche cette aide")
     print("  /quit       Quitte le programme")
     print(_hr())
-
 
 def print_plan_summary(plan: dict):
     """Affiche un résumé concis du plan."""
@@ -116,7 +88,6 @@ def print_plan_summary(plan: dict):
     )
     print(_hr())
 
-
 def print_constraints_respected(plan: dict):
     respected = plan.get("respected_constraints", [])
     violated = plan.get("violated_soft_constraints", [])
@@ -124,19 +95,15 @@ def print_constraints_respected(plan: dict):
     if respected or violated:
         print()
         print("  Contraintes :")
-        for r in respected[:5]:  # afficher les 5 premières
+        for r in respected[:5]:
             print(f"    ✓ {r}")
         for v in violated:
             print(f"    ✗ {v}")
-
 
 def print_assistant(text: str):
     print()
     print(f"  Assistant : {text}")
     print()
-
-
-# ─── Boucle principale ────────────────────────────────────────────────────
 
 def run(session_id: str, initial_mode: str = "flexible"):
     mode = initial_mode
@@ -161,7 +128,6 @@ def run(session_id: str, initial_mode: str = "flexible"):
         if not user_input:
             continue
 
-        # ── Commandes spéciales ──────────────────────────────────────────
         if user_input.startswith("/"):
             cmd = user_input.split(maxsplit=1)
             command = cmd[0].lower()
@@ -237,7 +203,6 @@ def run(session_id: str, initial_mode: str = "flexible"):
 
             continue
 
-        # ── Tour de conversation normal ──────────────────────────────────
         print("  [Traitement en cours…]")
 
         result = handle_turn(
@@ -253,14 +218,11 @@ def run(session_id: str, initial_mode: str = "flexible"):
         needs_info = result.get("needs_info")
         errors = result.get("errors", [])
 
-        # Afficher la réponse de l'assistant
         print_assistant(reply)
 
-        # Si des contraintes critiques manquent, on attend la prochaine réponse
         if needs_info:
             continue
 
-        # Afficher le plan si disponible
         if plan and plan.get("status") != "INFEASIBLE":
             last_plan = plan
             last_explanation = explanation
@@ -285,13 +247,9 @@ def run(session_id: str, initial_mode: str = "flexible"):
                     print(f"  {line}")
                 print()
 
-        # Afficher les erreurs non bloquantes (debug)
         non_critical_errors = [e for e in errors if not e.startswith("incomplete_constraints")]
         if non_critical_errors:
             print(f"  [debug] {'; '.join(non_critical_errors)}")
-
-
-# ─── Entrypoint ────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
@@ -312,7 +270,6 @@ def main():
 
     session_id = args.session or f"cli-{uuid.uuid4().hex[:8]}"
     run(session_id=session_id, initial_mode=args.mode)
-
 
 if __name__ == "__main__":
     main()

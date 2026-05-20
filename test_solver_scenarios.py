@@ -1,26 +1,20 @@
-"""
-Tests offline du solveur : multi-villes, multi-budgets, multi-durées.
-N'utilise pas le LLM (qui est actuellement down). Charge des données
-fictives directement pour exercer la chaîne data → solver → output.
-"""
+"""Tests offline du solveur : multi-villes, multi-budgets, multi-durées. N'utilise pas le LLM (qui est actuellement down). Charge des données"""
 import json
 import sys
 import math
 
 from solver import solve_with_city_data
 
-
 def build_fake_city(name: str, lat: float, lon: float, country: str = "XX",
                     n_acts: int = 18) -> dict:
     """Génère un city_data plausible pour tester le solveur."""
     cats = ["culture", "gastro", "nature", "shopping", "nightlife"]
     activities = []
-    # Distribuer les activités dans un rayon de ~5 km autour du centre
     import random
     rng = random.Random(hash(name) & 0xFFFFFFFF)
     for i in range(n_acts):
         cat = cats[i % len(cats)]
-        d_lat = (rng.random() - 0.5) * 0.08  # ~±4 km
+        d_lat = (rng.random() - 0.5) * 0.08
         d_lon = (rng.random() - 0.5) * 0.08
         cost = rng.choice([0, 0, 5, 10, 15, 25, 40])
         dur = rng.choice([1.0, 1.5, 2.0, 2.5, 3.0])
@@ -39,7 +33,6 @@ def build_fake_city(name: str, lat: float, lon: float, country: str = "XX",
             "confidence": 0.85,
         })
 
-    # Matrice haversine en minutes (à pied, 4 km/h)
     n = len(activities)
     matrix = [[0] * n for _ in range(n)]
     R = 6_371_000
@@ -82,7 +75,6 @@ def build_fake_city(name: str, lat: float, lon: float, country: str = "XX",
         "hotels": hotels,
     }
 
-
 def make_constraints(city, days, budget, start=9, end=19, pace="moderate",
                      prefs=None, travelers=1):
     return {
@@ -104,19 +96,16 @@ def make_constraints(city, days, budget, start=9, end=19, pace="moderate",
         "min_activities_per_day": 1,
     }
 
-
 SCENARIOS = [
-    # (city, lat, lon, days, budget, pace, prefs)
     ("Paris", 48.8566, 2.3522, 4, 2500, "moderate", ["culture"]),
     ("Lisbonne", 38.7223, -9.1393, 3, 1200, "relaxed", ["gastro", "culture"]),
     ("Marrakech", 31.6295, -7.9811, 5, 1800, "intense", ["culture", "shopping"]),
     ("Berlin", 52.5200, 13.4050, 2, 800, "moderate", ["nightlife"]),
     ("Kyoto", 35.0116, 135.7681, 7, 3500, "moderate", ["culture", "nature"]),
     ("Reykjavik", 64.1466, -21.9426, 3, 1500, "moderate", ["nature"]),
-    ("Petite ville test", 45.0, 5.0, 2, 600, "relaxed", []),  # budget serré
+    ("Petite ville test", 45.0, 5.0, 2, 600, "relaxed", []),
     ("Mégalopole", 40.0, -74.0, 6, 4000, "intense", []),
 ]
-
 
 def run_one(case):
     city, lat, lon, days, budget, pace, prefs = case
@@ -153,7 +142,6 @@ def run_one(case):
     transport = plan.get("transport_mode")
     print(f"  transport: {transport}")
 
-    # Vérifications par jour
     issues = []
     for d in plan.get("days", []):
         n = d.get("activity_count", 0)
@@ -168,10 +156,8 @@ def run_one(case):
             dist = t.get("distance_m")
             print(f"      → {t['minutes']} min · {dist}m · {mode}")
 
-        # Sanity : transitions = n-1
         if len(transitions) != max(0, n - 1):
             issues.append(f"Jour {d['day']} : {len(transitions)} transitions pour {n} activités")
-        # Sanity : si plusieurs activités, total_travel_minutes > 0
         if n >= 2 and (tt is None or tt <= 0):
             issues.append(f"Jour {d['day']} : {n} activités mais travel total = {tt}")
 
@@ -179,7 +165,6 @@ def run_one(case):
         print(f"  ⚠ Anomalies : {issues}")
         return False
     return True
-
 
 def main():
     print("\n=== Tests du solveur sur 8 scénarios ===\n")
@@ -194,7 +179,6 @@ def main():
         print(f"  {'✓' if ok else '✗'} {name}")
     failed = [n for n, ok in results if not ok]
     sys.exit(0 if not failed else 1)
-
 
 if __name__ == "__main__":
     main()

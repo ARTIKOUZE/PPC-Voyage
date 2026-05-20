@@ -1,21 +1,4 @@
-"""
-Extracteur de contraintes enrichi avec niveau d'obligation (required/value).
-
-Prend en entrée un texte utilisateur et retourne un JSON structuré :
-{
-    "destination": {"value": "Rome", "required": True},
-    "total_budget": {"value": 2000, "required": True},
-    "num_days": {"value": 5, "required": True},
-    "preferred_categories": {"value": ["culture"], "required": False},
-    ...
-}
-
-Règles :
-- Contraintes critiques (destination, budget, durée) → required = True
-- Préférences et options → required = False
-- Détection d'expressions vagues → signale les champs à clarifier
-- Module d'évaluation intégré pour mesurer la qualité de l'extraction
-"""
+"""Extracteur de contraintes enrichi avec niveau d'obligation (required/value). Prend en entrée un texte utilisateur et retourne un JSON structuré :"""
 from __future__ import annotations
 
 import re
@@ -24,17 +7,12 @@ from typing import Any, Optional
 
 from llm_client import extract_constraints as _llm_extract
 
-
-# ─── Classification des champs ─────────────────────────────────────────────
-
-# Champs critiques → required = True automatiquement
 CRITICAL_FIELDS: frozenset[str] = frozenset({
     "destination",
     "num_days",
     "total_budget",
 })
 
-# Champs optionnels → required = False
 OPTIONAL_FIELDS: frozenset[str] = frozenset({
     "num_travelers",
     "hotel_per_night",
@@ -49,7 +27,6 @@ OPTIONAL_FIELDS: frozenset[str] = frozenset({
     "min_activities_per_day",
 })
 
-# Valeurs par défaut raisonnables pour les champs optionnels
 REASONABLE_DEFAULTS: dict[str, Any] = {
     "num_travelers": 1,
     "hotel_per_night": 100,
@@ -58,8 +35,6 @@ REASONABLE_DEFAULTS: dict[str, Any] = {
     "max_activities_per_day": 3,
     "min_activities_per_day": 1,
 }
-
-# ─── Détection des expressions vagues ──────────────────────────────────────
 
 _VAGUE_PATTERNS: dict[str, list[str]] = {
     "total_budget": [
@@ -90,14 +65,8 @@ _VAGUE_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
-
 def detect_vague_fields(message: str) -> dict[str, bool]:
-    """
-    Détecte les expressions vagues dans le message utilisateur.
-
-    Returns:
-        {field: True} pour chaque champ mentionné de façon floue.
-    """
+    """Détecte les expressions vagues dans le message utilisateur."""
     msg_lower = message.lower()
     vague: dict[str, bool] = {}
     for field, patterns in _VAGUE_PATTERNS.items():
@@ -106,9 +75,6 @@ def detect_vague_fields(message: str) -> dict[str, bool]:
                 vague[field] = True
                 break
     return vague
-
-
-# ─── Extraction principale ─────────────────────────────────────────────────
 
 @dataclass
 class ConstraintItem:
@@ -119,26 +85,11 @@ class ConstraintItem:
     def to_dict(self) -> dict:
         return {"value": self.value, "required": self.required}
 
-
 def extract_structured_constraints(
     user_message: str,
     current_constraints: Optional[dict] = None,
 ) -> tuple[dict[str, dict], Optional[str], dict[str, bool]]:
-    """
-    Extrait les contraintes depuis un message utilisateur en les structurant
-    avec un niveau d'obligation.
-
-    Args:
-        user_message: texte brut de l'utilisateur
-        current_constraints: état courant (pour le contexte LLM)
-
-    Returns:
-        (structured, error, vague_fields)
-
-        structured: {field: {"value": ..., "required": bool}}
-        error: message d'erreur ou None
-        vague_fields: {field: True} pour les champs flous détectés
-    """
+    """Extrait les contraintes depuis un message utilisateur en les structurant avec un niveau d'obligation."""
     flat_constraints, error = _llm_extract(user_message, current_constraints)
     vague_fields = detect_vague_fields(user_message)
 
@@ -148,7 +99,6 @@ def extract_structured_constraints(
         required = field in CRITICAL_FIELDS
         structured[field] = {"value": value, "required": required}
 
-    # Appliquer les défauts raisonnables pour les champs non encore connus
     if current_constraints is not None:
         for field, default_val in REASONABLE_DEFAULTS.items():
             if field not in structured and field not in current_constraints:
@@ -156,49 +106,17 @@ def extract_structured_constraints(
 
     return structured, error, vague_fields
 
-
 def to_flat_dict(structured: dict[str, dict]) -> dict:
-    """Convertit le format structuré vers le dict plat attendu par le solveur."""
     return {field: item["value"] for field, item in structured.items()}
 
-
 def structured_from_flat(flat: dict) -> dict[str, dict]:
-    """
-    Construit le format structuré depuis un dict plat (pour l'état de session).
-    Utile pour afficher l'état courant avec les niveaux d'obligation.
-    """
     return {
         field: {"value": value, "required": field in CRITICAL_FIELDS}
         for field, value in flat.items()
     }
 
-
-# ─── Module d'évaluation ───────────────────────────────────────────────────
-
 def evaluate_extraction(extracted: dict, expected: dict) -> dict:
-    """
-    Évalue la qualité de l'extraction LLM en comparant avec les valeurs attendues.
-
-    Gestion des ambiguïtés :
-    - Comparaison insensible à la casse pour les strings
-    - Tolérance ±10% pour les valeurs numériques
-    - Correspondance partielle pour les listes
-
-    Args:
-        extracted: dict plat des contraintes extraites
-        expected: dict plat des contraintes attendues (ground truth)
-
-    Returns:
-        {
-            "precision": float,
-            "recall": float,
-            "f1": float,
-            "correct": int,
-            "false_positives": int,
-            "false_negatives": int,
-            "details": {field: {"extracted": ..., "expected": ..., "match": bool}}
-        }
-    """
+    """Évalue la qualité de l'extraction LLM en comparant avec les valeurs attendues. Gestion des ambiguïtés :"""
     tp = fp = fn = 0
     details: dict[str, dict] = {}
 
@@ -254,10 +172,8 @@ def evaluate_extraction(extracted: dict, expected: dict) -> dict:
         "details": details,
     }
 
-
 def _values_match(a: Any, b: Any) -> bool:
     """Comparaison tolérante entre deux valeurs extraites."""
-    # Listes : intersection partielle (au moins 50% de correspondance)
     if isinstance(a, list) and isinstance(b, list):
         if not a and not b:
             return True
@@ -268,17 +184,12 @@ def _values_match(a: Any, b: Any) -> bool:
         overlap = len(a_set & b_set)
         return overlap / max(len(a_set), len(b_set)) >= 0.5
 
-    # Numériques : tolérance ±10%
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         if b == 0:
             return a == 0
         return abs(a - b) / abs(b) <= 0.10
 
-    # Strings : insensible à la casse
     return str(a).lower().strip() == str(b).lower().strip()
-
-
-# ─── Test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=== Test constraint_extractor ===\n")
@@ -300,7 +211,6 @@ if __name__ == "__main__":
         print(f"  Flou       : {vague}")
         print()
 
-    # Test évaluation
     print("=== Test évaluation ===")
     extracted = {"destination": "Rome", "num_days": 5, "total_budget": 2100}
     expected = {"destination": "Rome", "num_days": 5, "total_budget": 2000}

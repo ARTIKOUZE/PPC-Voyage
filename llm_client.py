@@ -1,17 +1,4 @@
-"""
-Client LLM pour l'assistant de planification de voyage.
-
-Utilise un endpoint OpenAI-compatible (qwen3-35b via text-generation-webui).
-Deux responsabilités :
-  1. Extraction structurée des contraintes depuis du langage naturel (JSON mode)
-  2. Narration du plan CP-SAT résolu (texte libre concis)
-
-Stratégie d'extraction :
-  - Pydantic schéma strict pour valider la sortie
-  - Prompt système avec peu d'exemples (few-shot léger)
-  - JSON mode si supporté, sinon parse manuel avec fallback
-  - Retry 1x en cas d'erreur de parsing
-"""
+"""Client LLM pour l'assistant de planification de voyage. Utilise un endpoint OpenAI-compatible (qwen3-35b via text-generation-webui)."""
 
 from __future__ import annotations
 import os
@@ -28,17 +15,10 @@ except ImportError:
 
 from openai import OpenAI
 
-
-# ─────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────
-
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.medium.text-generation-webui.myia.io/v1")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3.6-35b-a3b")
 
-# Fallback : modèle plus léger (omnicoder-9b) sur un autre endpoint.
-# Utilisé automatiquement si l'endpoint principal échoue (timeout, 5xx, etc.).
 LLM_BASE_URL_FALLBACK = os.environ.get(
     "LLM_BASE_URL_FALLBACK", "https://api.mini.text-generation-webui.myia.io/v1"
 )
@@ -50,17 +30,11 @@ LLM_MODEL_FALLBACK = os.environ.get("LLM_MODEL_FALLBACK", "omnicoder-9b")
 _client: Optional[OpenAI] = None
 _client_fallback: Optional[OpenAI] = None
 
-# Hard-disable du mode "thinking" de qwen3 : sans ça le modèle consomme tous les
-# max_tokens en raisonnement interne (tokens cachés mais comptés) et renvoie un
-# message vide. Cette option est passée via extra_body et propagée par le backend
-# text-generation-webui au chat template du modèle.
 QWEN_NO_THINK = {"chat_template_kwargs": {"enable_thinking": False}}
-
 
 def get_client() -> OpenAI:
     global _client
     if _client is None:
-        # Timeout explicite pour éviter de bloquer l'UI si l'endpoint est lent
         _client = OpenAI(
             base_url=LLM_BASE_URL,
             api_key=LLM_API_KEY or "dummy",
@@ -68,7 +42,6 @@ def get_client() -> OpenAI:
             max_retries=1,
         )
     return _client
-
 
 def get_fallback_client() -> OpenAI:
     global _client_fallback
@@ -81,24 +54,8 @@ def get_fallback_client() -> OpenAI:
         )
     return _client_fallback
 
-
 def chat_with_fallback(timeout: Optional[float] = None, **kwargs):
-    """
-    Lance un chat.completions.create sur l'endpoint principal et bascule
-    automatiquement sur le fallback en cas d'échec (timeout, 5xx, JSON vide).
-
-    Args:
-        timeout: override le timeout par défaut du client (pour appels lourds)
-        **kwargs: paramètres OpenAI standards (messages, max_tokens, etc.)
-            `model` est automatiquement remplacé par le modèle correspondant
-            à chaque endpoint, sauf s'il est explicitement passé.
-
-    Returns:
-        L'objet ChatCompletion (peut venir du primaire ou du fallback).
-
-    Raises:
-        La dernière exception si les DEUX endpoints échouent.
-    """
+    """Lance un chat.completions.create sur l'endpoint principal et bascule automatiquement sur le fallback en cas d'échec (timeout, 5xx, JSON vide)."""
     import logging
     logger = logging.getLogger(__name__)
     last_err: Optional[Exception] = None
@@ -109,11 +66,8 @@ def chat_with_fallback(timeout: Optional[float] = None, **kwargs):
     ]:
         try:
             call_kwargs = dict(kwargs)
-            # Le modèle dépend de l'endpoint : si l'appelant n'a pas forcé,
-            # on prend le modèle par défaut de cet endpoint.
             call_kwargs.setdefault("model", default_model)
             if label == "fallback":
-                # Forcer le modèle du fallback (ignore le model du primaire)
                 call_kwargs["model"] = default_model
             target = client.with_options(timeout=timeout) if timeout else client
             return target.chat.completions.create(**call_kwargs)
@@ -121,23 +75,15 @@ def chat_with_fallback(timeout: Optional[float] = None, **kwargs):
             last_err = e
             logger.warning("[LLM/%s] échec : %s — tentative suivante", label, e)
 
-    # Les deux endpoints ont échoué
     assert last_err is not None
     raise last_err
-
-
-# ─────────────────────────────────────────────
-# Schéma des contraintes (aligné avec solver.TravelConstraints)
-# ─────────────────────────────────────────────
 
 VALID_CATEGORIES = ["culture", "gastro", "nature", "shopping", "nightlife"]
 VALID_PACES = ["relaxed", "moderate", "intense"]
 VALID_TRANSPORT = ["foot", "bike", "car"]
 
-
 class ExtractedConstraints(BaseModel):
-    """Sous-ensemble des contraintes modifiables par tour utilisateur.
-    Tous les champs sont optionnels : on ne renvoie que ce que le message modifie."""
+    """Sous-ensemble des contraintes modifiables par tour utilisateur. Tous les champs sont optionnels : on ne renvoie que ce que le message modifie."""
 
     destination: Optional[str] = None
     num_days: Optional[int] = Field(None, ge=1, le=21)
@@ -153,23 +99,21 @@ class ExtractedConstraints(BaseModel):
 
     must_visit: Optional[list[str]] = None
     must_avoid: Optional[list[str]] = None
-    must_visit_on_day: Optional[dict[str, int]] = None   # {"louvre": 3}  (jours 1-indexés)
+    must_visit_on_day: Optional[dict[str, int]] = None
 
     max_activities_per_day: Optional[int] = Field(None, ge=1, le=8)
     min_activities_per_day: Optional[int] = Field(None, ge=0, le=8)
 
-    # Cibles par catégorie sur tout le voyage (utiles pour "plus de culture", etc.)
     min_per_category: Optional[dict[str, int]] = None
     max_per_category: Optional[dict[str, int]] = None
 
     day_start_hour: Optional[int] = Field(None, ge=0, le=23)
     day_end_hour: Optional[int] = Field(None, ge=1, le=24)
 
-    transport_mode: Optional[str] = None  # "foot", "bike", "car"
+    transport_mode: Optional[str] = None
 
-    # Dates de séjour
-    start_date: Optional[str] = None     # ISO YYYY-MM-DD
-    end_date: Optional[str] = None       # ISO YYYY-MM-DD
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
 
     def clean(self) -> dict:
         """Retourne un dict ne contenant que les champs renseignés et validés."""
@@ -207,11 +151,6 @@ class ExtractedConstraints(BaseModel):
                     continue
             out[k] = v
         return out
-
-
-# ─────────────────────────────────────────────
-# Prompts
-# ─────────────────────────────────────────────
 
 EXTRACTION_SYSTEM_PROMPT = """You are a constraint extractor for a travel planner based on a CP-SAT solver.
 
@@ -357,7 +296,6 @@ User (current num_travelers=3, num_days=5, total_budget=2500): "Déplace le Louv
 user didn't mention them.)
 """
 
-
 NARRATION_SYSTEM_PROMPT = """You are the conversational interface of a travel planner.
 The CP-SAT solver has already produced an optimal plan that the user sees in a timeline next to the chat.
 
@@ -380,62 +318,39 @@ RÈGLES STRICTES sur le compte d'activités :
 - Pour mentionner le total, dis "le plan compte X activités au total" (pas "j'ai ajouté X").
 """
 
-
-# ─────────────────────────────────────────────
-# Extraction de contraintes
-# ─────────────────────────────────────────────
-
 _JSON_RE = re.compile(r"\{[\s\S]*\}")
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
-
 
 def _strip_thinking(text: str) -> str:
     """Retire les blocs <think>…</think> émis par qwen3/deepseek en mode reasoning."""
     return _THINK_RE.sub("", text)
 
-
 def _extract_json_blob(text: str) -> str:
-    """Extrait le premier objet JSON présent dans le texte, après suppression
-    des blocs de thinking et des fences markdown."""
+    """Extrait le premier objet JSON présent dans le texte, après suppression des blocs de thinking et des fences markdown."""
     text = _strip_thinking(text).strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     m = _JSON_RE.search(text)
     return m.group(0) if m else text
 
-
 def parse_json_salvage(blob: str):
-    """
-    Parse JSON ; si une erreur de syntaxe survient au milieu du JSON
-    (typique avec les LLM longs : virgule manquante, troncature), tronque
-    au dernier item de tableau bien fermé AVANT l'erreur et ferme proprement
-    la structure pour récupérer ce qui est parseable.
-
-    Returns: dict/list parsé. Raise la JSONDecodeError d'origine si non récupérable.
-    """
+    """Parse JSON ; si une erreur de syntaxe survient au milieu du JSON (typique avec les LLM longs : virgule manquante, troncature), tronque"""
     try:
         return json.loads(blob)
     except json.JSONDecodeError as initial_err:
         err_pos = initial_err.pos
 
-    # Tronquer juste avant l'erreur.
     prefix = blob[:err_pos]
-    # Le dernier item complet d'un tableau se termine par "}," suivi du début
-    # d'un nouvel item, ou par "}]" en fin de tableau. On cherche la dernière
-    # occurrence de "}," dans le prefix : c'est le dernier item séparé.
     candidates = []
     last_comma_after_brace = prefix.rfind("},")
     if last_comma_after_brace >= 0:
-        candidates.append(last_comma_after_brace + 1)  # position après '}'
-    # Cas où l'erreur survient dès le 2ᵉ item : on cherche le '}' qui
-    # précède l'erreur, suivi seulement d'espaces.
+        candidates.append(last_comma_after_brace + 1)
     last_brace = prefix.rfind("}")
     if last_brace >= 0:
         candidates.append(last_brace + 1)
 
     for truncate_at in candidates:
         truncated = blob[:truncate_at]
-        # Refermer le tableau + l'objet racine
         for closing in ("]}", "}", ""):
             try:
                 return json.loads(truncated + closing)
@@ -443,7 +358,6 @@ def parse_json_salvage(blob: str):
                 continue
 
     raise initial_err
-
 
 _PENDING_FIELD_HINTS: dict[str, str] = {
     "destination": "destination (city name)",
@@ -453,7 +367,6 @@ _PENDING_FIELD_HINTS: dict[str, str] = {
     "day_end_hour": "day_end_hour (integer 1-24, hour to stop activities)",
 }
 
-
 def extract_constraints(
     user_message: str,
     current_constraints: Optional[dict] = None,
@@ -461,18 +374,7 @@ def extract_constraints(
     pending_field: Optional[str] = None,
     plan_summary: Optional[str] = None,
 ) -> tuple[dict, Optional[str]]:
-    """
-    Extrait les contraintes d'un message utilisateur.
-
-    Args:
-        pending_field: si le bot vient d'asker pour un champ donné, on l'indique
-            au LLM pour qu'il interprète correctement une réponse courte
-            (ex: "5" → num_days=5 si pending_field="num_days").
-
-    Returns:
-        (constraints_dict, error_message_or_None)
-        constraints_dict ne contient que les champs à modifier.
-    """
+    """Extrait les contraintes d'un message utilisateur. Args:"""
     current_constraints = current_constraints or {}
 
     hint = ""
@@ -518,11 +420,6 @@ def extract_constraints(
 
     return {}, last_err
 
-
-# ─────────────────────────────────────────────
-# Narration du plan
-# ─────────────────────────────────────────────
-
 def _summarize_plan(plan: dict, constraints: dict) -> str:
     """Résumé compact du plan pour l'injecter dans le prompt."""
     if not plan:
@@ -545,7 +442,6 @@ def _summarize_plan(plan: dict, constraints: dict) -> str:
         f"Temps forts : {'; '.join(highlights)}."
     )
 
-
 def narrate_plan(
     user_message: str,
     plan: dict,
@@ -553,15 +449,10 @@ def narrate_plan(
     extracted_changes: dict,
     previous_count: Optional[int] = None,
 ) -> str:
-    """Génère la réponse conversationnelle à afficher dans le chat.
-    `previous_count` (si fourni) = nombre d'activités du plan précédent,
-    pour que le LLM puisse être honnête sur le delta réel et ne pas
-    halluciner « j'ai ajouté X activités » alors que rien n'a bougé.
-    Aucun fallback : si le LLM échoue, l'exception remonte à l'appelant."""
+    """Génère la réponse conversationnelle à afficher dans le chat. `previous_count` (si fourni) = nombre d'activités du plan précédent,"""
     plan_summary = _summarize_plan(plan, constraints)
     changes_str = json.dumps(extracted_changes, ensure_ascii=False) if extracted_changes else "aucune"
 
-    # Delta concret pour empêcher l'hallucination du LLM narrateur
     delta_block = ""
     if previous_count is not None and plan and plan.get("summary"):
         new_count = plan["summary"].get("total_activities", 0)
@@ -594,8 +485,6 @@ def narrate_plan(
                 f"augmenter le budget, ou modifier les catégories préférées."
             )
 
-    # Info de saturation du pool d'activités (utile quand l'utilisateur
-    # demande "plus" mais le pool est déjà épuisé).
     pool_block = ""
     if plan and plan.get("pool_stats"):
         ps = plan["pool_stats"]
@@ -625,11 +514,6 @@ def narrate_plan(
     )
     raw = resp.choices[0].message.content or ""
     return _strip_thinking(raw).strip()
-
-
-# ─────────────────────────────────────────────
-# Test
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     print(f"LLM endpoint : {LLM_BASE_URL}")

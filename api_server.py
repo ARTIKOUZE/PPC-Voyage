@@ -1,17 +1,5 @@
-"""
-Serveur HTTP FastAPI qui expose le pipeline NL → CP-SAT au frontend React.
-
-Endpoints :
-  POST /chat     { session_id, message }  → { reply, extracted, constraints, plan, city, errors }
-  GET  /state    ?session_id=...          → { constraints }
-  POST /reset    { session_id }           → { ok: true }
-  GET  /health                             → { ok: true, llm, model }
-
-Lancer :
-  uvicorn api_server:app --reload --port 8000
-
-CORS ouvert en local pour permettre au frontend React (vite/cra) d'appeler l'API.
-"""
+"""Serveur HTTP FastAPI qui expose le pipeline NL → CP-SAT au frontend React.
+Endpoints :"""
 
 from __future__ import annotations
 import os
@@ -28,20 +16,14 @@ try:
 except ImportError:
     pass
 
-
 app = FastAPI(title="Travel Planner CP-SAT + LLM", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],       # dev only ; restreindre en prod
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# ─────────────────────────────────────────────
-# Modèles de requête
-# ─────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     session_id: str = Field(default="default")
@@ -50,14 +32,8 @@ class ChatRequest(BaseModel):
     mode: str = Field(default="flexible", pattern="^(flexible|strict)$")
     transport_mode: str | None = Field(default=None, pattern="^(foot|bike|car)$")
 
-
 class ResetRequest(BaseModel):
     session_id: str = Field(default="default")
-
-
-# ─────────────────────────────────────────────
-# Endpoints
-# ─────────────────────────────────────────────
 
 @app.get("/health")
 def health():
@@ -66,7 +42,6 @@ def health():
         "llm_endpoint": LLM_BASE_URL,
         "llm_model": LLM_MODEL,
     }
-
 
 @app.post("/chat")
 def chat(req: ChatRequest):
@@ -82,17 +57,14 @@ def chat(req: ChatRequest):
     )
     return result
 
-
 @app.get("/state")
 def state(session_id: str = "default"):
     return {"constraints": get_session_state(session_id)}
-
 
 @app.post("/reset")
 def reset(req: ResetRequest):
     reset_session(req.session_id)
     return {"ok": True}
-
 
 if __name__ == "__main__":
     import uvicorn
