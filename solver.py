@@ -1,122 +1,17 @@
 """
-Solveur CP-SAT pour la planification de voyage.
-Modélise un voyage multi-jours avec activités, repas, transport et hébergement.
+Solveur CP-SAT (8 types de contraintes) + entrypoint solve_with_city_data.
 
-Types de contraintes implémentés :
-  1. Budget (globales et par catégorie)
-  2. Temporelles / Scheduling (IntervalVar, durées, horaires d'ouverture)
-  3. Incompatibilités et prérequis logiques
-  4. Capacité / ressource (1 activité par créneau, temps de trajet)
-  5. Préférences soft (priorités utilisateur, pondérées dans l'objectif)
-  6. Cardinalité (min/max d'activités par catégorie, par jour)
+Modèles de domaine → solver_models.py
+Explication des compromis → solver_explain.py
 """
+from __future__ import annotations
 
 from ortools.sat.python import cp_model
-from dataclasses import dataclass, field
 from typing import Optional
-import json
-import math
 
-
-# ─────────────────────────────────────────────
-# Données du domaine
-# ─────────────────────────────────────────────
-
-@dataclass
-class Activity:
-    id: str
-    name: str
-    category: str            # "culture", "gastro", "nature", "shopping", "nightlife"
-    duration_hours: float     # durée en heures
-    cost_euros: int           # coût par personne
-    opening_hour: int         # heure d'ouverture (0-23)
-    closing_hour: int         # heure de fermeture (0-23)
-    zone: str                # zone géographique dans la ville
-    priority_score: int       # 1-10, score d'intérêt par défaut
-    available_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
-    latitude: float = 0.0
-    longitude: float = 0.0
-    nearest_stop: str = ""
-    transit_options: list = field(default_factory=list)  # [{"type":"metro","line":"12"}, ...]
-    transit_exit: str = ""
-    closed_days: list[str] = field(default_factory=list)  # ["monday","tuesday"] = jours hebdo fermés
-
-
-def dict_to_activity(d: dict) -> Activity:
-    """Convertit un dict venant de data_provider.build_city_data() en Activity."""
-    options = d.get("transit_options") or []
-    closed = d.get("closed_days") or []
-    return Activity(
-        id=d["id"],
-        name=d["name"],
-        category=d.get("category", "culture"),
-        duration_hours=float(d.get("duration_hours", 1.5)),
-        cost_euros=int(d.get("cost_euros", 0)),
-        opening_hour=int(d.get("opening_hour", 9)),
-        closing_hour=int(d.get("closing_hour", 18)),
-        zone=d.get("zone", ""),
-        priority_score=int(d.get("priority_score", 5)),
-        available_days=d.get("available_days", [0, 1, 2, 3, 4, 5, 6]),
-        latitude=float(d.get("latitude", 0.0)),
-        longitude=float(d.get("longitude", 0.0)),
-        nearest_stop=str(d.get("nearest_stop") or ""),
-        transit_options=[o for o in options if isinstance(o, dict) and o.get("type")],
-        transit_exit=str(d.get("transit_exit") or ""),
-        closed_days=[str(c).lower() for c in closed if isinstance(c, str)],
-    )
-
-
-@dataclass
-class TravelConstraints:
-    """Contraintes extraites du langage naturel par le LLM."""
-    destination: str = "Rome"
-    num_days: int = 5
-    total_budget: int = 2000
-    daily_food_budget: int = 60
-    num_travelers: int = 1
-    hotel_per_night: int = 100
-
-    # Préférences soft
-    preferred_categories: list[str] = field(default_factory=list)
-    avoided_categories: list[str] = field(default_factory=list)
-    preferred_pace: str = "moderate"  # "relaxed", "moderate", "intense"
-    morning_preference: str = "culture"  # catégorie préférée le matin
-
-    # Contraintes logiques
-    must_visit: list[str] = field(default_factory=list)       # activités obligatoires (nom ou ID)
-    must_avoid: list[str] = field(default_factory=list)       # activités exclues (nom ou ID)
-    must_visit_on_day: dict[str, int] = field(default_factory=dict)  # {nom_ou_id: jour_1indexed}
-    incompatible_pairs: list[tuple[str, str]] = field(default_factory=list)
-    prerequisites: dict[str, str] = field(default_factory=dict)  # {B: A} = A avant B
-
-    # Cardinalité
-    max_activities_per_day: int = 6
-    min_activities_per_day: int = 1
-    max_per_category: dict[str, int] = field(default_factory=dict)
-    min_per_category: dict[str, int] = field(default_factory=dict)
-
-    # Fenêtre horaire journalière (None = pas de contrainte)
-    day_start_hour: Optional[int] = None   # heure souhaitée de début (ex: 9)
-    day_end_hour: Optional[int] = None     # heure souhaitée de fin   (ex: 18)
-
-    # Dates de séjour (ISO YYYY-MM-DD)
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    # Jours de la semaine pour chaque jour du plan (0=lundi … 6=dimanche), dérivé de start_date
-    trip_weekdays: list[int] = field(default_factory=list)
-
-
-def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Distance en mètres entre deux points GPS (formule haversine).
-    Utilisée uniquement pour l'affichage des distances dans le plan retourné,
-    JAMAIS comme fallback de la matrice OSRM."""
-    R = 6_371_000.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlam = math.radians(lon2 - lon1)
-    a = (math.sin(dphi / 2) ** 2
-         + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+from solver_models import (
+    Activity, TravelConstraints, dict_to_activity, haversine_meters,
+)
 
 
 
@@ -125,27 +20,20 @@ def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
 # ─────────────────────────────────────────────
 
 class TravelPlannerSolver:
-    """
-    Solveur de planification de voyage basé sur CP-SAT.
+    """Solveur CP-SAT pour la planification de voyage.
 
-    Variables de décision :
-      - assign[a, d] : booléen, l'activité a est assignée au jour d
-      - slot[a, d]   : entier, créneau horaire de début (en demi-heures depuis 7h)
-      - intervals     : IntervalVar pour le scheduling
+    Variables : `assign[a,d]` BoolVar (activité a assignée au jour d),
+    `start[a,d]` IntVar (créneau de 30 min depuis 7h), `intervals[a,d]`
+    OptionalFixedSizeIntervalVar (scheduling), `selected[a]` BoolVar.
 
-    Modes :
-      - "flexible" (défaut) : préférences = soft constraints (bonus/pénalités)
-      - "strict"            : préférences catégories = hard constraints (filtre dur)
-
-    L'objectif maximise la satisfaction (score de priorité pondéré par les préférences)
-    tout en respectant toutes les contraintes hard.
+    Modes : `flexible` (préférences = soft) ou `strict` (catégories = hard).
+    Objectif : `maximize(Σ soft_bonuses − Σ soft_penalties)`.
     """
 
-    # Granularité : 30 minutes
-    SLOT_DURATION = 30  # minutes
-    DAY_START = 7       # 7h du matin
-    DAY_END = 24        # minuit
-    SLOTS_PER_DAY = (DAY_END - DAY_START) * 2  # 34 créneaux de 30min
+    SLOT_DURATION = 30   # minutes par slot
+    DAY_START = 7        # journée commence à 7h
+    DAY_END = 24         # journée finit à minuit
+    SLOTS_PER_DAY = (DAY_END - DAY_START) * 2
 
     def __init__(
         self,
@@ -159,94 +47,67 @@ class TravelPlannerSolver:
     ):
         self.activities = {a.id: a for a in activities}
         self.constraints = constraints
-        self.mode = mode  # "flexible" | "strict"
-        self._transport_mode = transport_mode  # "foot", "bike", "car"
-        # Plan précédent. Format accepté :
-        #   {day_idx_0based: [activity_id, ...]}              (legacy, bonus seul)
-        #   {day_idx_0based: [(activity_id, start_slot), ...]} (pin strict + bonus)
+        self.mode = mode
+        self._transport_mode = transport_mode
+        # previous_plan : {day_0based: [(act_id, start_slot)…]} ou [act_id…] (legacy)
         self._previous_plan = previous_plan or {}
-        # Jours explicitement modifiés ce tour-ci. None = pas de pinning
-        # (premier tour, ou changement structurel). set() vide = tous les jours pinned.
+        # touched_days : None = pas de pin, set() = pin tout, {1,3} = laisse libres
         self._touched_days = touched_days
         self.model = cp_model.CpModel()
 
-        # Index activity_id -> position dans travel_matrix
         self._act_order = [a.id for a in activities]
         self._act_index = {a_id: i for i, a_id in enumerate(self._act_order)}
         self.travel_matrix = travel_matrix
 
-        # Variables
-        self.assign = {}    # (activity_id, day) -> BoolVar
-        self.start = {}     # (activity_id, day) -> IntVar
-        self.intervals = {} # (activity_id, day) -> IntervalVar
-        self.selected = {}  # activity_id -> BoolVar (sélectionnée au moins un jour)
-
-        # Soft constraint penalties
-        self.soft_penalties = []
-        self.soft_bonuses = []
+        self.assign: dict = {}     # (act_id, day) -> BoolVar
+        self.start: dict = {}      # (act_id, day) -> IntVar
+        self.intervals: dict = {}  # (act_id, day) -> IntervalVar
+        self.selected: dict = {}   # act_id -> BoolVar
+        self.soft_penalties: list = []
+        self.soft_bonuses: list = []
 
         self._build_model()
 
     def _build_model(self):
-        # Variables temporaires pour la pénalité de trajet (remplies par _add_capacity_constraints)
-        self._pair_both_assigned: dict = {}
+        self._pair_both_assigned: dict = {}  # rempli par _add_capacity_constraints
         self._create_variables()
-        self._add_budget_constraints()          # Type 1
-        self._add_temporal_constraints()         # Type 2
-        self._add_logical_constraints()          # Type 3
-        self._add_capacity_constraints()         # Type 4
-        self._add_soft_preferences()             # Type 5
-        self._add_cardinality_constraints()      # Type 6
-        self._add_meal_time_constraints()        # Restaurants : créneaux déjeuner/dîner
-        self._add_travel_penalty()               # Optimisation : minimiser temps de trajet
-        self._add_pin_constraints()              # Multi-tours : pin hard des jours non touchés
-        self._add_stability_bonus()              # Multi-tours : bonus soft pour le reste
+        self._add_budget_constraints()        # type 1
+        self._add_temporal_constraints()      # type 2
+        self._add_logical_constraints()       # type 3
+        self._add_capacity_constraints()      # type 4
+        self._add_soft_preferences()          # type 5
+        self._add_cardinality_constraints()   # type 6
+        self._add_meal_time_constraints()     # type 7 (fenêtres disjonctives)
+        self._add_travel_penalty()            # objectif : minimiser trajets
+        self._add_pin_constraints()           # multi-tours : pin jours non touchés
+        self._add_stability_bonus()           # multi-tours : bonus soft ailleurs
         self._set_objective()
 
     def _create_variables(self):
         C = self.constraints
         for a_id, act in self.activities.items():
-            # Variable globale : cette activité est-elle sélectionnée ?
             self.selected[a_id] = self.model.new_bool_var(f"sel_{a_id}")
 
             for d in range(C.num_days):
                 if d % 7 not in act.available_days:
                     continue
-
-                # Assigner l'activité a au jour d
                 self.assign[a_id, d] = self.model.new_bool_var(f"assign_{a_id}_d{d}")
-
-                # Créneau de début (en slots de 30min depuis 7h)
                 dur_slots = int(act.duration_hours * 2)
                 max_start = self.SLOTS_PER_DAY - dur_slots
-
                 self.start[a_id, d] = self.model.new_int_var(
                     0, max(0, max_start), f"start_{a_id}_d{d}"
                 )
-
-                # IntervalVar optionnel (actif seulement si assigné)
                 self.intervals[a_id, d] = self.model.new_optional_fixed_size_interval_var(
-                    self.start[a_id, d],
-                    dur_slots,
-                    self.assign[a_id, d],
-                    f"interval_{a_id}_d{d}"
+                    self.start[a_id, d], dur_slots, self.assign[a_id, d],
+                    f"interval_{a_id}_d{d}",
                 )
 
-            # Lien : selected <=> assignée exactement 1 jour (jamais plus)
-            day_vars = [
-                self.assign[a_id, d]
-                for d in range(C.num_days)
-                if (a_id, d) in self.assign
-            ]
+            # selected ⇔ exactement 1 jour assigné (at_most_one + bool_or + impl).
+            day_vars = [self.assign[a_id, d] for d in range(C.num_days)
+                        if (a_id, d) in self.assign]
             if day_vars:
-                # Contrainte HARD : chaque activité sur au plus 1 jour
-                # add_at_most_one est le propagateur dédié CP-SAT (plus robuste que sum <= 1)
                 self.model.add_at_most_one(day_vars)
-
-                # selected = 1 ssi au moins un jour assigné
-                # → si selected=1 : au moins un day_var=1
                 self.model.add_bool_or(day_vars + [self.selected[a_id].negated()])
-                # → si un jour assigné : selected=1
                 for dv in day_vars:
                     self.model.add_implication(dv, self.selected[a_id])
             else:
@@ -256,10 +117,7 @@ class TravelPlannerSolver:
 
     def _add_budget_constraints(self):
         C = self.constraints
-
-        # Budget total pour les activités
-        # Hôtel = prix de CHAMBRE par nuit (pas multiplié par voyageurs)
-        # Repas = budget par personne par jour
+        # Hôtel = chambre/nuit (pas × voyageurs). Repas = par voyageur/jour.
         hotel_total = C.hotel_per_night * C.num_days
         food_total = C.daily_food_budget * C.num_days * C.num_travelers
         activity_budget = max(0, C.total_budget - hotel_total - food_total)
@@ -271,27 +129,20 @@ class TravelPlannerSolver:
         )
         self.model.add(activity_cost <= activity_budget)
 
-        # Soft : pénaliser une trop grosse sous-utilisation du budget activités.
-        # Cible : dépenser au moins 70 % du budget activités s'il dépasse 100 €.
-        # On évite de pénaliser quand le budget est très serré (≤ 100 €).
-        # On n'applique PAS cette pénalité en pace=relaxed : l'utilisateur veut
-        # peu d'activités, le forcer à utiliser le budget contredirait le pace.
+        # Pénalité de sous-dépense : cible 70 % du budget activités, sauf en
+        # `relaxed` (où sous-dépenser est cohérent avec « peu d'activités »).
         if activity_budget > 100 and C.preferred_pace != "relaxed":
             target_spend = (activity_budget * 7) // 10
-            underspend = self.model.new_int_var(
-                0, activity_budget, "activity_underspend"
-            )
+            underspend = self.model.new_int_var(0, activity_budget, "act_underspend")
             self.model.add(underspend >= target_spend - activity_cost)
             self.model.add(underspend >= 0)
-            # Pénalité = underspend // 20 (1 point par 20€ de sous-dépense).
-            # Doit rester ~comparable aux bonus d'activité (~5-13 par act).
             penalty_var = self.model.new_int_var(
-                0, activity_budget // 20 + 1, "activity_underspend_pen"
+                0, activity_budget // 20 + 1, "act_underspend_pen"
             )
             self.model.add_division_equality(penalty_var, underspend, 20)
             self.soft_penalties.append(penalty_var)
 
-        # Budget quotidien food : les activités gastro comptent dans le budget food
+        # Repas gastro inclus dans le budget food/jour
         for d in range(C.num_days):
             daily_gastro = sum(
                 self.assign[a_id, d] * act.cost_euros * C.num_travelers
@@ -303,52 +154,36 @@ class TravelPlannerSolver:
     # ── TYPE 2 : Contraintes temporelles ────────────
 
     def _day_window_slots(self) -> tuple[int, int]:
-        """
-        Calcule la fenêtre horaire journalière en slots (1 slot = 30 min depuis DAY_START).
-        La fenêtre fin est stricte (pas de marge) pour respecter l'heure de fin demandée.
-        La fenêtre début admet 30 min de tolérance avant l'heure souhaitée.
-
-        Si aucune préférence : fenêtre = toute la journée [DAY_START, DAY_END].
-        """
+        """Fenêtre journalière en slots. Début tolérant (−30 min), fin stricte."""
         C = self.constraints
-        START_MARGIN = 1  # tolérance de 30 min avant l'heure de début demandée
-
+        START_MARGIN = 1
         if C.day_start_hour is not None:
             raw_start = max(self.DAY_START, C.day_start_hour)
             win_start = max(0, (raw_start - self.DAY_START) * 2 - START_MARGIN)
         else:
             win_start = 0
-
         if C.day_end_hour is not None:
             raw_end = min(self.DAY_END, C.day_end_hour)
-            # Fin stricte : l'activité doit être terminée à l'heure indiquée
             win_end = min(self.SLOTS_PER_DAY, (raw_end - self.DAY_START) * 2)
         else:
             win_end = self.SLOTS_PER_DAY
-
         return win_start, win_end
 
     def _add_temporal_constraints(self):
         win_start, win_end = self._day_window_slots()
-
         for a_id, act in self.activities.items():
             for d in range(self.constraints.num_days):
                 if (a_id, d) not in self.assign:
                     continue
-
                 dur_slots = int(act.duration_hours * 2)
-
-                # Respect des horaires d'ouverture de l'activité
                 open_slot = max(0, (act.opening_hour - self.DAY_START) * 2)
                 close_slot = min(self.SLOTS_PER_DAY,
                                  (min(act.closing_hour, self.DAY_END) - self.DAY_START) * 2)
-
-                # Fenêtre effective = intersection(horaires activité, fenêtre utilisateur)
+                # Intersection (horaires activité ∩ fenêtre utilisateur)
                 eff_start = max(open_slot, win_start)
                 eff_end = min(close_slot, win_end)
-
                 if eff_end - eff_start < dur_slots:
-                    # L'activité ne peut pas tenir dans la fenêtre → l'exclure
+                    # Ne tient pas dans la fenêtre → exclure
                     self.model.add(self.assign[a_id, d] == 0)
                     continue
 
@@ -363,33 +198,18 @@ class TravelPlannerSolver:
     # ── Résolution fuzzy d'un nom/ID vers un ID interne ─────────────────
 
     def _resolve_activity(self, name_or_id: str) -> Optional[str]:
-        """
-        Résout un nom ou ID d'activité vers l'ID interne du solveur.
-
-        Ordre de priorité :
-          1. Correspondance exacte sur l'ID
-          2. Correspondance exacte sur le nom (insensible à la casse)
-          3. Sous-chaîne : le terme est contenu dans le nom ou vice-versa
-             (min 4 caractères pour éviter les faux positifs)
-        """
-        # 1. Exact ID match
+        """Résout un nom/ID utilisateur vers l'ID interne (exact > sous-chaîne)."""
         if name_or_id in self.activities:
             return name_or_id
-
         term = name_or_id.lower().strip()
-
-        # 2. Exact name match (case-insensitive)
         for a_id, act in self.activities.items():
             if act.name.lower() == term:
                 return a_id
-
-        # 3. Substring match (term in name, or name in term)
         if len(term) >= 4:
             for a_id, act in self.activities.items():
                 name_l = act.name.lower()
                 if term in name_l or name_l in term:
                     return a_id
-
         return None
 
     # ── TYPE 3 : Contraintes logiques ───────────────
@@ -397,31 +217,28 @@ class TravelPlannerSolver:
     def _add_logical_constraints(self):
         C = self.constraints
 
-        # Must visit : forcer la sélection (résolution fuzzy nom→ID)
+        # must_visit : forcer selected = 1 (résolution fuzzy nom→ID)
         for name_or_id in C.must_visit:
             a_id = self._resolve_activity(name_or_id)
             if a_id:
                 self.model.add(self.selected[a_id] == 1)
 
-        # Must visit on day : forcer sur un jour précis (jours 1-indexés → 0-indexés)
+        # must_visit_on_day : épingler à un jour précis (1-indexé → 0-indexé)
         for name_or_id, day_1 in C.must_visit_on_day.items():
             a_id = self._resolve_activity(name_or_id)
             if not a_id:
                 continue
-            day = day_1 - 1  # conversion en 0-indexé
+            day = day_1 - 1
             if 0 <= day < C.num_days and (a_id, day) in self.assign:
-                # Contrainte hard : cette activité DOIT être placée ce jour-là
                 self.model.add(self.assign[a_id, day] == 1)
                 self.model.add(self.selected[a_id] == 1)
-                # Interdire les autres jours pour cette activité
                 for d in range(C.num_days):
                     if d != day and (a_id, d) in self.assign:
                         self.model.add(self.assign[a_id, d] == 0)
             elif a_id in self.selected:
-                # Jour hors plage : au moins forcer la sélection globale
                 self.model.add(self.selected[a_id] == 1)
 
-        # Must avoid : interdire la sélection (résolution fuzzy)
+        # must_avoid : interdire selected
         for name_or_id in C.must_avoid:
             a_id = self._resolve_activity(name_or_id)
             if a_id:
@@ -431,33 +248,22 @@ class TravelPlannerSolver:
         for a1, a2 in C.incompatible_pairs:
             for d in range(C.num_days):
                 if (a1, d) in self.assign and (a2, d) in self.assign:
-                    self.model.add(
-                        self.assign[a1, d] + self.assign[a2, d] <= 1
-                    )
+                    self.model.add(self.assign[a1, d] + self.assign[a2, d] <= 1)
 
-        # Prérequis : A doit être fait avant B (jour strict)
+        # Prérequis : si B sélectionné alors A aussi, et A doit être un jour avant B
         for b_id, a_id in C.prerequisites.items():
             if a_id not in self.selected or b_id not in self.selected:
                 continue
-            # Si B est sélectionné, A doit l'être aussi
-            self.model.add(
-                self.selected[a_id] >= self.selected[b_id]
-            )
-            # Et A doit être un jour avant B
+            self.model.add(self.selected[a_id] >= self.selected[b_id])
             for d_b in range(C.num_days):
                 if (b_id, d_b) not in self.assign:
                     continue
                 for d_a in range(d_b, C.num_days):
                     if (a_id, d_a) not in self.assign:
                         continue
-                    # Si B est au jour d_b et A au jour d_a >= d_b, c'est interdit
-                    self.model.add(
-                        self.assign[b_id, d_b] + self.assign[a_id, d_a] <= 1
-                    )
+                    self.model.add(self.assign[b_id, d_b] + self.assign[a_id, d_a] <= 1)
 
-        # ── Fermetures hebdomadaires (closed_days × trip_weekdays) ───────────
-        # Si on connaît le jour de la semaine de chaque jour du séjour, on interdit
-        # de placer une activité sur un jour où elle est fermée.
+        # Fermetures hebdomadaires (closed_days × trip_weekdays)
         _WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         for d in range(C.num_days):
             if d >= len(C.trip_weekdays):
@@ -469,150 +275,106 @@ class TravelPlannerSolver:
                     self.model.add(self.assign[a_id, d] == 0)
 
     def _choose_segment_mode(self, foot_minutes: int, dist_m, src_act=None):
-        """
-        Choisit le mode de transport pour un segment.
-        Utilise les transit_options de l'activité de départ pour retourner
-        le type exact (metro, bus, rer, tram…) plutôt que le générique "transit".
-        """
+        """Mode de transport pour un segment. Si bike/car globaux, on garde.
+        Sinon foot ≤ 25 min, ou bascule transit (~3× plus rapide) sinon."""
         base = getattr(self, "_transport_mode", "foot")
         if base in ("car", "bike"):
             return (base, foot_minutes)
-
-        long_walk = foot_minutes > 25 and (dist_m is None or dist_m > 1500)
-        if long_walk:
+        if foot_minutes > 25 and (dist_m is None or dist_m > 1500):
             transit_min = max(8, foot_minutes // 3 + 5)
-            # Déduire le mode précis depuis les transit_options de l'activité source
             specific_mode = "transit"
             if src_act and src_act.transit_options:
                 raw_type = (src_act.transit_options[0].get("type") or "").lower()
-                if raw_type in ("metro", "bus", "rer", "tram", "train", "funiculaire", "ferry", "navette"):
+                if raw_type in ("metro", "bus", "rer", "tram", "train",
+                                "funiculaire", "ferry", "navette"):
                     specific_mode = raw_type
             return (specific_mode, transit_min)
         return ("foot", foot_minutes)
 
     def _travel_minutes(self, a1_id: str, a2_id: str) -> int:
-        """Temps de trajet entre deux activités, depuis la matrice OSRM.
-        Lève si la matrice est absente ou indexable (pas de fallback)."""
+        """Temps de trajet (OSRM, pas de fallback)."""
         if self.travel_matrix is None:
-            raise RuntimeError(
-                "travel_matrix obligatoire : aucune valeur fallback n'est tolérée."
-            )
-        i = self._act_index[a1_id]
-        j = self._act_index[a2_id]
-        return int(self.travel_matrix[i][j])
+            raise RuntimeError("travel_matrix obligatoire (aucun fallback).")
+        return int(self.travel_matrix[self._act_index[a1_id]][self._act_index[a2_id]])
 
     # ── TYPE 4 : Capacité et ressources ─────────────
 
     def _add_capacity_constraints(self):
         C = self.constraints
 
-        # Non-chevauchement des activités chaque jour (NoOverlap)
+        # NoOverlap par jour
         for d in range(C.num_days):
-            day_intervals = [
-                self.intervals[a_id, d]
-                for a_id in self.activities
-                if (a_id, d) in self.intervals
-            ]
+            day_intervals = [self.intervals[a_id, d] for a_id in self.activities
+                             if (a_id, d) in self.intervals]
             if day_intervals:
                 self.model.add_no_overlap(day_intervals)
 
-        # Temps de trajet entre activités consécutives
-        # Implémenté via un espacement minimum entre les intervalles
+        # Temps de trajet entre activités co-assignées (disjunction pairwise)
         act_list = list(self.activities.keys())
         for d in range(C.num_days):
             for i, a1 in enumerate(act_list):
                 for a2 in act_list[i + 1:]:
                     if (a1, d) not in self.assign or (a2, d) not in self.assign:
                         continue
-
                     travel = self._travel_minutes(a1, a2)
                     travel_slots = max(1, travel // self.SLOT_DURATION)
                     dur1 = int(self.activities[a1].duration_hours * 2)
                     dur2 = int(self.activities[a2].duration_hours * 2)
 
-                    # Soit a1 finit + trajet avant a2, soit l'inverse
-                    # (seulement si les deux sont assignées ce jour)
                     both_assigned = self.model.new_bool_var(f"both_{a1}_{a2}_d{d}")
-                    self.model.add_min_equality(
-                        both_assigned,
-                        [self.assign[a1, d], self.assign[a2, d]]
-                    )
-                    # Exposé pour _add_travel_penalty
+                    self.model.add_min_equality(both_assigned,
+                        [self.assign[a1, d], self.assign[a2, d]])
                     self._pair_both_assigned[(a1, a2, d)] = (both_assigned, travel)
 
-                    # a1 avant a2
                     order_var = self.model.new_bool_var(f"order_{a1}_{a2}_d{d}")
-
                     self.model.add(
                         self.start[a1, d] + dur1 + travel_slots <= self.start[a2, d]
                     ).only_enforce_if([both_assigned, order_var])
-
                     self.model.add(
                         self.start[a2, d] + dur2 + travel_slots <= self.start[a1, d]
                     ).only_enforce_if([both_assigned, order_var.negated()])
 
     # ── TYPE 5 : Préférences soft (ou hard en mode strict) ─────────────────
 
+    # Pénalités de rythme asymétriques : c'est ce qui différencie les paces.
+    # En relaxed, l'overflow est puni ; en intense, c'est le shortfall.
+    # Une journée vide coûte target × short_w ∈ [45, 125], bien au-dessus des
+    # bonus de priorité (~10) → les jours se remplissent jusqu'au target.
+    _PACE_CONFIG = {
+        "relaxed":  {"target": 3, "short_w": 15, "over_w": 10},
+        "moderate": {"target": 4, "short_w": 20, "over_w": 4},
+        "intense":  {"target": 5, "short_w": 25, "over_w": 1},
+    }
+
     def _add_soft_preferences(self):
         C = self.constraints
 
-        # Mode strict : les catégories préférées deviennent des contraintes hard.
-        # Seules les activités appartenant aux catégories préférées (ou must_visit)
-        # peuvent être sélectionnées.
+        # Mode strict : catégories préférées = filtre hard
         if self.mode == "strict" and C.preferred_categories:
             for a_id, act in self.activities.items():
-                if (
-                    act.category not in C.preferred_categories
-                    and a_id not in C.must_visit
-                ):
+                if (act.category not in C.preferred_categories
+                        and a_id not in C.must_visit):
                     self.model.add(self.selected[a_id] == 0)
 
         for a_id, act in self.activities.items():
             score = act.priority_score
-
-            # Bonus si catégorie préférée
             if act.category in C.preferred_categories:
-                # En mode strict le filtre hard suffit ; en flexible on booste davantage
                 score += 5 if self.mode == "strict" else 3
-
-            # Malus si catégorie évitée (soft même en strict, car must_visit peut primer)
             if act.category in C.avoided_categories:
                 score -= 5
-
             self.soft_bonuses.append(self.selected[a_id] * score)
 
-        # Préférence de rythme : pénalités asymétriques distinctes par rythme.
-        # C'est ce qui différencie réellement relaxed / moderate / intense :
-        #   - relaxed : pénalité forte sur l'overflow (n'en mets pas trop)
-        #   - intense : pénalité forte sur le shortfall (remplis bien la journée)
-        # Sans cette asymétrie les trois rythmes convergent vers le maximum
-        # naturel autorisé par les durées + le budget.
-        # Poids renforcés sur le shortfall : on veut vraiment remplir les jours.
-        # Le shortfall est multiplié par target_jour, donc une journée vide
-        # coûte 3*15=45 (relaxed) à 5*25=125 (intense) — bien plus que tout
-        # bonus de priorité (~10) → le solveur saturera les jours.
-        PACE_CONFIG = {
-            "relaxed":  {"target": 3, "short_w": 15, "over_w": 10},
-            "moderate": {"target": 4, "short_w": 20, "over_w": 4},
-            "intense":  {"target": 5, "short_w": 25, "over_w": 1},
-        }
-        pace = C.preferred_pace if C.preferred_pace in PACE_CONFIG else "moderate"
-        cfg = PACE_CONFIG[pace]
+        pace = C.preferred_pace if C.preferred_pace in self._PACE_CONFIG else "moderate"
+        cfg = self._PACE_CONFIG[pace]
         target = cfg["target"]
-
         for d in range(C.num_days):
-            day_count = sum(
-                self.assign[a_id, d]
-                for a_id in self.activities
-                if (a_id, d) in self.assign
-            )
-            # shortfall = max(0, target - day_count)
+            day_count = sum(self.assign[a_id, d] for a_id in self.activities
+                            if (a_id, d) in self.assign)
             shortfall = self.model.new_int_var(0, target, f"shortfall_d{d}")
             self.model.add(shortfall >= target - day_count)
             self.model.add(shortfall >= 0)
             self.soft_penalties.append(shortfall * cfg["short_w"])
 
-            # overflow = max(0, day_count - target)
             max_over = max(0, C.max_activities_per_day - target)
             if cfg["over_w"] > 0 and max_over > 0:
                 overflow = self.model.new_int_var(0, max_over, f"overflow_d{d}")
@@ -620,22 +382,18 @@ class TravelPlannerSolver:
                 self.model.add(overflow >= 0)
                 self.soft_penalties.append(overflow * cfg["over_w"])
 
-        # Préférence matin : culture le matin
+        # Préférence matin (start ≤ slot 10 = 12h)
         if C.morning_preference:
             for a_id, act in self.activities.items():
                 if act.category == C.morning_preference:
                     for d in range(C.num_days):
                         if (a_id, d) not in self.assign:
                             continue
-                        # Bonus si commence avant midi (slot 10 = 12h)
                         is_morning = self.model.new_bool_var(f"morn_{a_id}_d{d}")
                         self.model.add(self.start[a_id, d] <= 10).only_enforce_if(is_morning)
                         self.model.add(self.start[a_id, d] > 10).only_enforce_if(is_morning.negated())
-
-                        # Bonus seulement si assignée ET le matin
                         morning_bonus = self.model.new_bool_var(f"morn_bonus_{a_id}_d{d}")
-                        self.model.add_min_equality(
-                            morning_bonus,
+                        self.model.add_min_equality(morning_bonus,
                             [self.assign[a_id, d], is_morning]
                         )
                         self.soft_bonuses.append(morning_bonus * 2)
@@ -702,10 +460,10 @@ class TravelPlannerSolver:
             if cat in C.min_per_category:
                 self.model.add(cat_count >= C.min_per_category[cat])
 
-    # ── Contraintes des heures de repas (restaurants) ─────────────────
+    # ── TYPE 7 : Heures de repas (fenêtres disjonctives) ─────────────────
 
-    # Mots-clés qui désignent une activité gastro NON-restaurant
-    # (visite, atelier, dégustation, marché, glacier, café…)
+    # Mots-clés excluant une activité gastro de la catégorie "restaurant"
+    # (visites, ateliers, marchés, glaciers, dégustations…)
     _NON_RESTAURANT_KEYWORDS = (
         "marché", "market", "halles",
         "tour", "tournée", "tasting", "dégustation",
@@ -717,40 +475,21 @@ class TravelPlannerSolver:
     )
 
     def _is_restaurant(self, act: Activity) -> bool:
-        """
-        Heuristique : cette activité gastro est-elle un restaurant
-        servant un repas formel (déjeuner ou dîner) ?
-
-        Exclut les activités gastro "non-repas" (marchés, ateliers,
-        dégustations, glaciers…) par mots-clés sur le nom.
-        """
+        """Heuristique : gastro avec durée 1-3h et nom non-exclusif."""
         if act.category != "gastro":
             return False
         name = act.name.lower()
         if any(kw in name for kw in self._NON_RESTAURANT_KEYWORDS):
             return False
-        # Repas typique : 1h à 3h
         return 1.0 <= act.duration_hours <= 3.0
 
     def _add_meal_time_constraints(self):
-        """
-        Contrainte HARD : tout restaurant sélectionné doit démarrer dans
-        une des deux fenêtres :
-          - Déjeuner : 12h00 → 14h00
-          - Dîner    : 19h30 → 21h30
-
-        Implémentation CP-SAT classique : disjunction sur deux fenêtres
-        temporelles via deux BoolVar (is_lunch / is_dinner) avec
-        `only_enforce_if`. Si l'activité n'est pas assignée, aucune
-        contrainte ne s'applique.
-        """
-        # Slots (1 slot = 30 min, DAY_START = 7h)
-        # 12h = slot 10, 14h = slot 14
-        # 19h30 = slot 25, 21h30 = slot 29
-        LUNCH_START = (12 - self.DAY_START) * 2
-        LUNCH_END = (14 - self.DAY_START) * 2
-        DINNER_START = int((19.5 - self.DAY_START) * 2)
-        DINNER_END = int((21.5 - self.DAY_START) * 2)
+        """HARD : start d'un restaurant ∈ [12h, 14h] ∨ [19h30, 21h30].
+        Disjunction modélisée par 2 BoolVar (lunch/dinner) + only_enforce_if."""
+        LUNCH_START = (12 - self.DAY_START) * 2          # slot 10
+        LUNCH_END = (14 - self.DAY_START) * 2            # slot 14
+        DINNER_START = int((19.5 - self.DAY_START) * 2)  # slot 25
+        DINNER_END = int((21.5 - self.DAY_START) * 2)    # slot 29
 
         for a_id, act in self.activities.items():
             if not self._is_restaurant(act):
@@ -758,73 +497,42 @@ class TravelPlannerSolver:
             for d in range(self.constraints.num_days):
                 if (a_id, d) not in self.assign:
                     continue
-
                 is_lunch = self.model.new_bool_var(f"lunch_{a_id}_d{d}")
                 is_dinner = self.model.new_bool_var(f"dinner_{a_id}_d{d}")
-
-                # Si assignée : exactement un service (déjeuner XOR dîner)
                 self.model.add(is_lunch + is_dinner == 1).only_enforce_if(
-                    self.assign[a_id, d]
-                )
+                    self.assign[a_id, d])
+                self.model.add(self.start[a_id, d] >= LUNCH_START
+                    ).only_enforce_if([self.assign[a_id, d], is_lunch])
+                self.model.add(self.start[a_id, d] <= LUNCH_END
+                    ).only_enforce_if([self.assign[a_id, d], is_lunch])
+                self.model.add(self.start[a_id, d] >= DINNER_START
+                    ).only_enforce_if([self.assign[a_id, d], is_dinner])
+                self.model.add(self.start[a_id, d] <= DINNER_END
+                    ).only_enforce_if([self.assign[a_id, d], is_dinner])
 
-                # Fenêtre déjeuner : start in [LUNCH_START, LUNCH_END]
-                self.model.add(
-                    self.start[a_id, d] >= LUNCH_START
-                ).only_enforce_if([self.assign[a_id, d], is_lunch])
-                self.model.add(
-                    self.start[a_id, d] <= LUNCH_END
-                ).only_enforce_if([self.assign[a_id, d], is_lunch])
-
-                # Fenêtre dîner : start in [DINNER_START, DINNER_END]
-                self.model.add(
-                    self.start[a_id, d] >= DINNER_START
-                ).only_enforce_if([self.assign[a_id, d], is_dinner])
-                self.model.add(
-                    self.start[a_id, d] <= DINNER_END
-                ).only_enforce_if([self.assign[a_id, d], is_dinner])
-
-    # ── Pénalité de trajet (optimisation des distances) ────────────────
+    # ── Pénalité de trajet (regroupement géographique) ────────────────
 
     def _add_travel_penalty(self):
-        """
-        Nudge soft : encourage le regroupement géographique sans bloquer
-        la sélection de plusieurs activités par jour.
-
-        Échelle : un trajet ≤ 15 min ne coûte rien (intra-quartier),
-        un trajet de 60 min vaut ~4 points (vs ~10 points de bonus par
-        activité), un trajet de 100 min en vaut ~8.
-        """
+        """Nudge soft : trajet ≤ 15 min = gratuit, sinon (travel-15)//10 par paire."""
         for (a1, a2, d), (both_assigned, travel_min) in self._pair_both_assigned.items():
             weight = max(0, (int(travel_min) - 15) // 10)
             if weight > 0:
                 self.soft_penalties.append(both_assigned * weight)
 
-    # ── Bonus de stabilité + pinning multi-tours ──────────────
+    # ── Stabilité + pinning multi-tours ──────────────
 
     @staticmethod
     def _iter_prev_plan(entries):
-        """Itère sur le plan précédent (format legacy ou tuple)."""
+        """Itère le plan précédent (tuples ou IDs legacy)."""
         for entry in entries:
             if isinstance(entry, (list, tuple)):
-                yield entry[0], entry[1]   # (act_id, start_slot)
+                yield entry[0], entry[1]
             else:
-                yield entry, None          # legacy : act_id seul
+                yield entry, None
 
     def _add_stability_bonus(self):
-        """
-        Bonus SOFT pour conservation du plan précédent.
-
-        Poids dynamique selon le contexte :
-          - Si on n'a pas de pin (touched_days = None, ex: "ajoute X" sans jour
-            spécifié), le solveur a toute liberté → on met un poids ÉLEVÉ (20)
-            pour qu'il ne change que le strict minimum.
-          - Si on a un pin partiel (touched_days = {…}), les jours non touchés
-            sont déjà figés en dur. On garde un poids modéré (8) pour les jours
-            touchés afin de préférer les choix existants quand c'est possible.
-
-        Le poids doit dépasser les bonus de priorité moyens (~10) pour que
-        le solveur ne déplace pas une activité juste pour gagner +2 ailleurs.
-        """
+        """Bonus soft pour préserver les (act, day) du tour précédent.
+        Poids dynamique : 20 si pas de pin (modif globale), 8 si pin partiel."""
         if not self._previous_plan:
             return
         STABILITY_WEIGHT = 20 if self._touched_days is None else 8
@@ -832,38 +540,23 @@ class TravelPlannerSolver:
             for act_id, _slot in self._iter_prev_plan(entries):
                 if (act_id, day_idx) in self.assign:
                     self.soft_bonuses.append(
-                        self.assign[act_id, day_idx] * STABILITY_WEIGHT
-                    )
+                        self.assign[act_id, day_idx] * STABILITY_WEIGHT)
 
     def _add_pin_constraints(self):
-        """
-        Pinning HARD des jours non touchés par l'utilisateur ce tour-ci.
-        Garantit que les jours non mentionnés sont identiques au tour précédent
-        (mêmes activités sur les mêmes créneaux). Évite le reshuffle pour des
-        gains marginaux d'objectif.
-
-        - self._touched_days = None  → pas de pinning (premier tour ou
-          changement structurel comme budget/durée/rythme/catégories).
-        - self._touched_days = set() → tous les jours pinned (aucune modif
-          mentionnée, utilisateur a juste discuté).
-        - self._touched_days = {2, 4} → jours 2 et 4 libres, les autres pinned.
-        """
+        """Pin HARD des jours NON touchés par le tour : assign + start figés,
+        autres activités interdites. touched_days = None ⇒ pas de pin."""
         if self._touched_days is None or not self._previous_plan:
             return
-
         for day_idx, entries in self._previous_plan.items():
             if day_idx in self._touched_days:
-                continue  # jour explicitement modifié → laisser libre
+                continue
             pinned_ids: set[str] = set()
             for act_id, slot in self._iter_prev_plan(entries):
                 if (act_id, day_idx) in self.assign:
-                    # Activité forcée sur ce jour
                     self.model.add(self.assign[act_id, day_idx] == 1)
-                    # Créneau de début forcé si on l'a
                     if slot is not None and (act_id, day_idx) in self.start:
                         self.model.add(self.start[act_id, day_idx] == int(slot))
                     pinned_ids.add(act_id)
-            # Interdire toute autre activité sur ce jour pinned
             for a_id in self.activities:
                 if a_id in pinned_ids:
                     continue
@@ -943,7 +636,7 @@ class TravelPlannerSolver:
                 dst = self.activities.get(a2["id"])
                 dist_m = None
                 if src and dst and src.latitude and dst.latitude:
-                    dist_m = _haversine_meters(
+                    dist_m = haversine_meters(
                         src.latitude, src.longitude,
                         dst.latitude, dst.longitude,
                     )
@@ -1014,102 +707,125 @@ class TravelPlannerSolver:
         return plan
 
     def _audit_constraints(self, plan: dict) -> tuple[list[str], list[str]]:
-        """
-        Analyse la solution et retourne les listes de contraintes respectées/violées.
-        """
+        """Inventaire des contraintes respectées vs violées (post-solve)."""
         C = self.constraints
         respected: list[str] = []
         violated: list[str] = []
-
         summary = plan.get("summary", {})
         days = plan.get("days", [])
-
-        selected_ids = {
-            act["id"]
-            for day in days
-            for act in day.get("activities", [])
-        }
-        selected_categories = [
-            act["category"]
-            for day in days
-            for act in day.get("activities", [])
-        ]
+        selected_ids = {a["id"] for day in days for a in day.get("activities", [])}
+        cats = [a["category"] for day in days for a in day.get("activities", [])]
 
         # Budget
         if summary.get("remaining_budget", 0) >= 0:
             respected.append(f"Budget respecté (reste {summary['remaining_budget']}€)")
         else:
             violated.append(f"Budget dépassé de {abs(summary['remaining_budget'])}€")
-
-        # Durée
         respected.append(f"Durée exacte : {C.num_days} jour(s)")
 
-        # Activités par jour
+        # Cardinalité par jour
         for day in days:
             count = day["activity_count"]
             if count > C.max_activities_per_day:
-                violated.append(
-                    f"Jour {day['day']} : {count} activités > max ({C.max_activities_per_day})"
-                )
+                violated.append(f"Jour {day['day']} : {count} > max ({C.max_activities_per_day})")
             elif count < C.min_activities_per_day:
-                violated.append(
-                    f"Jour {day['day']} : {count} activités < min ({C.min_activities_per_day})"
-                )
+                violated.append(f"Jour {day['day']} : {count} < min ({C.min_activities_per_day})")
             else:
-                respected.append(
-                    f"Jour {day['day']} : {count} activité(s) dans les limites"
-                )
+                respected.append(f"Jour {day['day']} : {count} activité(s) OK")
 
-        # Must-visit (résolution fuzzy)
+        # must_visit / must_visit_on_day / must_avoid (fuzzy)
+        def _name(a_id, fallback):
+            return self.activities[a_id].name if a_id and a_id in self.activities else fallback
+
         for name_or_id in C.must_visit:
             a_id = self._resolve_activity(name_or_id)
-            act_name = (self.activities[a_id].name if a_id and a_id in self.activities
-                        else name_or_id)
-            if a_id and a_id in selected_ids:
-                respected.append(f"Activité obligatoire présente : {act_name}")
-            else:
-                violated.append(f"Activité obligatoire absente : {act_name}")
+            n = _name(a_id, name_or_id)
+            (respected if a_id and a_id in selected_ids else violated).append(
+                f"Obligatoire {'présente' if a_id in selected_ids else 'absente'} : {n}")
 
-        # Must-visit-on-day (résolution fuzzy)
         for name_or_id, day_1 in C.must_visit_on_day.items():
             a_id = self._resolve_activity(name_or_id)
-            act_name = (self.activities[a_id].name if a_id and a_id in self.activities
-                        else name_or_id)
+            n = _name(a_id, name_or_id)
             if a_id:
                 day_acts = days[day_1 - 1].get("activities", []) if 0 < day_1 <= len(days) else []
-                on_day = any(act["id"] == a_id for act in day_acts)
-                if on_day:
-                    respected.append(f"{act_name} planifiée au jour {day_1} ✓")
-                else:
-                    violated.append(f"{act_name} demandée au jour {day_1} mais absente")
+                on_day = any(a["id"] == a_id for a in day_acts)
+                (respected if on_day else violated).append(
+                    f"{n} {'planifiée' if on_day else 'absente'} au jour {day_1}")
 
-        # Must-avoid (résolution fuzzy)
         for name_or_id in C.must_avoid:
             a_id = self._resolve_activity(name_or_id)
-            act_name = (self.activities[a_id].name if a_id and a_id in self.activities
-                        else name_or_id)
-            if a_id and a_id not in selected_ids:
-                respected.append(f"Activité exclue bien absente : {act_name}")
-            elif a_id:
-                violated.append(f"Activité exclue présente : {act_name}")
+            n = _name(a_id, name_or_id)
+            if a_id:
+                (respected if a_id not in selected_ids else violated).append(
+                    f"Exclue {'bien absente' if a_id not in selected_ids else 'présente'} : {n}")
 
-        # Préférences catégories (soft)
+        # Préférences soft de catégories
         for cat in C.preferred_categories:
-            count = selected_categories.count(cat)
-            if count > 0:
-                respected.append(f"Catégorie préférée '{cat}' : {count} activité(s)")
-            else:
-                violated.append(f"Catégorie préférée '{cat}' : aucune activité planifiée")
-
-        # Catégories évitées (soft)
+            count = cats.count(cat)
+            (respected if count else violated).append(
+                f"Catégorie préférée '{cat}' : {count} activité(s)")
         for cat in C.avoided_categories:
-            count = selected_categories.count(cat)
-            if count == 0:
-                respected.append(f"Catégorie évitée '{cat}' : bien absente")
-            else:
-                violated.append(f"Catégorie évitée '{cat}' : {count} activité(s) présente(s)")
+            count = cats.count(cat)
+            (respected if not count else violated).append(
+                f"Catégorie évitée '{cat}' : {count} présente(s)")
 
         return respected, violated
+
+
+# Champs d'activité enrichie à propager du city_data vers le plan en sortie
+_ENRICHED_ACTIVITY_FIELDS = (
+    "opening_hours", "flexible_hours", "closed_days",
+    "price_info", "student_discount", "student_cost_euros",
+    "last_entry_before_close_minutes", "address",
+    "nearest_stop", "transit_options", "transit_exit",
+    "data_confidence", "data_source",
+)
+
+
+def _infeasible_budget(constraints, hotel_cost, food_cost):
+    fixed = hotel_cost + food_cost
+    deficit = fixed - constraints.total_budget
+    return {
+        "status": "INFEASIBLE",
+        "message": (
+            f"Budget {constraints.total_budget}€ trop faible : hébergement + "
+            f"repas = {fixed}€ (manque {deficit}€)."
+        ),
+        "days": [], "summary": {
+            "total_cost": fixed, "budget": constraints.total_budget,
+            "remaining_budget": -deficit, "total_activities": 0,
+            "hotel_cost": hotel_cost, "food_cost": food_cost, "activity_cost": 0,
+        },
+        "stats": {"status_name": "INFEASIBLE_BUDGET"},
+        "respected_constraints": [],
+        "violated_soft_constraints": [f"Budget dépassé de {deficit}€"],
+    }
+
+
+def _derive_trip_weekdays(constraints):
+    if not constraints.start_date or constraints.trip_weekdays:
+        return
+    try:
+        from datetime import date, timedelta
+        y, m, d = map(int, constraints.start_date.split("-"))
+        d0 = date(y, m, d)
+        constraints.trip_weekdays = [
+            (d0 + timedelta(days=i)).weekday() for i in range(constraints.num_days)
+        ]
+    except (ValueError, TypeError):
+        constraints.trip_weekdays = []
+
+
+def _select_hotel(city_data, cap):
+    """Hôtel le plus cher ≤ cap (le plus haut-de-gamme dans le budget).
+    Fallback : le moins cher si aucun ne rentre. Renvoie le dict ou None."""
+    hotels = city_data.get("hotels") or []
+    if not hotels:
+        return None
+    below = [h for h in hotels if (h.get("price_per_night") or 0) <= cap]
+    if below:
+        return max(below, key=lambda h: h.get("price_per_night") or 0)
+    return min(hotels, key=lambda h: h.get("price_per_night") or 0)
 
 
 def solve_with_city_data(
@@ -1120,135 +836,57 @@ def solve_with_city_data(
     previous_plan: Optional[dict[int, list]] = None,
     touched_days: Optional[set[int]] = None,
 ) -> dict:
-    """
-    Entrypoint principal. Consomme la sortie de data_provider.build_city_data().
-
-    Args:
-        constraints_dict: contraintes extraites par le LLM (dict)
-        city_data: {"city": {...}, "activities": [dict, ...], "travel_matrix": [[...]], ...}
-        time_limit_seconds: timeout CP-SAT
-        mode: "flexible" (défaut) ou "strict" (préférences = hard constraints)
-
-    Returns:
-        plan dict enrichi de city_info, respected_constraints, violated_soft_constraints.
-    """
+    """Entrypoint principal : consomme un city_data, renvoie le plan complet."""
     constraints = TravelConstraints(**{
         k: v for k, v in constraints_dict.items()
         if k in TravelConstraints.__dataclass_fields__
     })
-
-    # Dériver trip_weekdays depuis start_date
-    if constraints.start_date and not constraints.trip_weekdays:
-        try:
-            from datetime import date, timedelta
-            y, m, d = map(int, constraints.start_date.split("-"))
-            d0 = date(y, m, d)
-            constraints.trip_weekdays = [
-                (d0 + timedelta(days=i)).weekday()
-                for i in range(constraints.num_days)
-            ]
-        except (ValueError, TypeError):
-            constraints.trip_weekdays = []
+    _derive_trip_weekdays(constraints)
 
     activities = [dict_to_activity(a) for a in city_data.get("activities", [])]
     if not activities:
         return {
             "status": "INFEASIBLE",
             "message": f"Aucune activité disponible pour {constraints.destination}.",
-            "days": [],
-            "summary": {},
-            "stats": {},
-            "respected_constraints": [],
-            "violated_soft_constraints": [],
+            "days": [], "summary": {}, "stats": {},
+            "respected_constraints": [], "violated_soft_constraints": [],
         }
 
-    # Vérif amont : le budget couvre-t-il au moins hôtel + repas ?
-    # Utilise le prix de l'hôtel le moins cher disponible (≤ cap budget), pas le cap lui-même.
-    # Sinon un cap haut (legacy de session précédente) faussement déclare INFEASIBLE.
-    hotel_options_check = city_data.get("hotels") or []
-    cap = constraints.hotel_per_night
-    candidates = [
-        (h.get("price_per_night") or 0)
-        for h in hotel_options_check
-        if (h.get("price_per_night") or 0) <= cap
-    ]
-    if not candidates and hotel_options_check:
-        # Si aucun hôtel ne rentre dans le cap, on utilise le moins cher quand même
-        candidates = [min((h.get("price_per_night") or 0) for h in hotel_options_check)]
-    effective_hotel_price = min(candidates) if candidates else cap
+    # Pré-sélection de l'hôtel : on s'aligne sur son prix réel pour que le
+    # solveur ait le bon budget activités (sinon on rejette des plans pourtant
+    # faisables car l'allocation théorique surestime le coût hôtel).
+    preselected_hotel = _select_hotel(city_data, constraints.hotel_per_night)
+    if preselected_hotel:
+        real_price = int(preselected_hotel.get("price_per_night") or 0)
+        if real_price > 0:
+            constraints.hotel_per_night = real_price
 
-    hotel_cost_check = effective_hotel_price * constraints.num_days
-    food_cost_check = constraints.daily_food_budget * constraints.num_days * constraints.num_travelers
-    fixed_cost = hotel_cost_check + food_cost_check
-    if fixed_cost > constraints.total_budget:
-        deficit = fixed_cost - constraints.total_budget
-        return {
-            "status": "INFEASIBLE",
-            "message": (
-                f"Budget {constraints.total_budget}€ trop faible : "
-                f"l'hébergement et les repas coûtent déjà {fixed_cost}€ "
-                f"(manque {deficit}€). Augmente le budget, réduis hotel_per_night, "
-                f"ou diminue daily_food_budget."
-            ),
-            "days": [],
-            "summary": {
-                "total_cost": fixed_cost,
-                "budget": constraints.total_budget,
-                "remaining_budget": -deficit,
-                "total_activities": 0,
-                "hotel_cost": hotel_cost_check,
-                "food_cost": food_cost_check,
-                "activity_cost": 0,
-            },
-            "stats": {"status_name": "INFEASIBLE_BUDGET"},
-            "respected_constraints": [],
-            "violated_soft_constraints": [
-                f"Budget dépassé de {deficit}€ rien que pour hôtel + repas"
-            ],
-        }
+    # Vérif amont budget (avec prix RÉEL de l'hôtel choisi)
+    hotel_cost = constraints.hotel_per_night * constraints.num_days
+    food_cost = constraints.daily_food_budget * constraints.num_days * constraints.num_travelers
+    if hotel_cost + food_cost > constraints.total_budget:
+        return _infeasible_budget(constraints, hotel_cost, food_cost)
 
     travel_matrix = city_data.get("travel_matrix")
     transport_mode = city_data.get("transport_mode", "foot")
-
     planner = TravelPlannerSolver(
         activities, constraints,
         travel_matrix=travel_matrix, mode=mode, transport_mode=transport_mode,
         previous_plan=previous_plan, touched_days=touched_days,
     )
     result = planner.solve(time_limit_seconds=time_limit_seconds)
-    # Pas de retry fallback : un INFEASIBLE est remonté tel quel.
 
-    # Enrichir avec infos ville + lat/lon dans chaque activité du plan
+    # Enrichissement du résultat
     result["city"] = city_data.get("city", {})
     result["data_source"] = city_data.get("data_source", "unknown")
     result["transport_mode"] = transport_mode
     result["start_date"] = constraints.start_date
     result["end_date"] = constraints.end_date
     result["trip_weekdays"] = constraints.trip_weekdays
-    # Sélectionner l'hôtel le PLUS CHER dans le budget hôtel/nuit
-    # (objectif : exploiter le budget pour proposer du haut-de-gamme aux gros budgets,
-    # cf. règle 40 % du budget total dans l'orchestrateur).
-    hotel_options = city_data.get("hotels") or []
-    if hotel_options:
-        budget_per_night = constraints.hotel_per_night
-        below = [h for h in hotel_options if (h.get("price_per_night") or 0) <= budget_per_night]
-        if below:
-            chosen = max(below, key=lambda h: h.get("price_per_night") or 0)
-        else:
-            # Aucun hôtel sous le budget : prendre le moins cher (tant pis pour le dépassement)
-            chosen = min(hotel_options, key=lambda h: h.get("price_per_night") or 0)
-        result["hotel"] = chosen
+    if preselected_hotel:
+        result["hotel"] = preselected_hotel
 
-        # Recaler le summary avec le COÛT RÉEL de l'hôtel choisi
-        # (le solveur avait calculé avec le budget alloué, pas le prix effectif)
-        if result.get("summary"):
-            actual_per_night = int(chosen.get("price_per_night") or 0)
-            actual_hotel_cost = actual_per_night * constraints.num_days
-            previous_hotel_cost = int(result["summary"].get("hotel_cost", 0) or 0)
-            delta = previous_hotel_cost - actual_hotel_cost  # économie sur l'hôtel
-            result["summary"]["hotel_cost"] = actual_hotel_cost
-            result["summary"]["total_cost"] = int(result["summary"].get("total_cost", 0) or 0) - delta
-            result["summary"]["remaining_budget"] = int(result["summary"].get("remaining_budget", 0) or 0) + delta
+    # Propager lat/lon + champs enrichis sur chaque activité du plan
     if "days" in result:
         act_by_id = {a.id: a for a in activities}
         src_dict_by_id = {a["id"]: a for a in city_data.get("activities", [])}
@@ -1258,23 +896,13 @@ def solve_with_city_data(
                 if src:
                     act["latitude"] = src.latitude
                     act["longitude"] = src.longitude
-                # Propager les champs enrichis (horaires, prix, transit…)
                 src_dict = src_dict_by_id.get(act["id"], {})
-                for field_name in (
-                    "opening_hours", "flexible_hours", "closed_days",
-                    "price_info", "student_discount", "student_cost_euros",
-                    "last_entry_before_close_minutes",
-                    "address",
-                    "nearest_stop", "transit_options", "transit_exit",
-                    "data_confidence", "data_source",
-                ):
-                    if field_name in src_dict:
-                        act[field_name] = src_dict[field_name]
+                for f in _ENRICHED_ACTIVITY_FIELDS:
+                    if f in src_dict:
+                        act[f] = src_dict[f]
 
-    # Enrichir les transitions "transit" avec itinéraires étape par étape
+    # Enrichir les transitions "transit" via le routeur externe si disponible
     if result.get("days"):
-        city_name = city_data.get("city", {}).get("name", constraints.destination)
-        # Ajouter l'adresse dans chaque transition pour aider le routeur
         src_addr = {a["id"]: a.get("address", "") for a in city_data.get("activities", [])}
         for day in result["days"]:
             for trans in day.get("transitions", []):
@@ -1282,146 +910,22 @@ def solve_with_city_data(
                 trans.setdefault("to_address", src_addr.get(trans.get("to_id", ""), ""))
         try:
             from transit_router import enrich_transitions_with_routing
+            city_name = city_data.get("city", {}).get("name", constraints.destination)
             result = enrich_transitions_with_routing(result, city_name)
         except Exception as e:
             import logging as _log
             _log.getLogger(__name__).warning("[Solver] Transit routing skipped: %s", e)
 
-    # Stats de saturation pour transparence (utile au narrateur + UI)
+    # Stats de saturation du pool (utile pour le narrateur + UI)
     pool_size = len(activities)
     selected = result.get("summary", {}).get("total_activities", 0)
     result["pool_stats"] = {
-        "pool_size": pool_size,
-        "selected": selected,
+        "pool_size": pool_size, "selected": selected,
         "saturation_ratio": round(selected / pool_size, 2) if pool_size else 0,
         "pool_exhausted": selected >= pool_size,
     }
-
     return result
 
 
-# ─────────────────────────────────────────────
-# explain_solution : explication des compromis
-# ─────────────────────────────────────────────
-
-def explain_solution(solution: dict, constraints: dict) -> str:
-    """
-    Génère une explication naturelle des compromis de la solution CP-SAT.
-
-    Explique :
-    - Pourquoi certaines préférences ne sont pas respectées
-    - L'utilisation du budget
-    - Le rythme moyen vs le rythme souhaité
-    - Les alternatives possibles pour les préférences non satisfaites
-
-    Args:
-        solution: plan retourné par solve_with_city_data()
-        constraints: dict plat des contraintes (état de session)
-
-    Returns:
-        Texte explicatif en français.
-    """
-    if not solution:
-        return "Aucune solution disponible."
-
-    if solution.get("status") == "INFEASIBLE":
-        msg = solution.get("message", "")
-        lines = ["Aucun plan ne satisfait toutes les contraintes."]
-        if msg:
-            lines.append(msg)
-        budget = constraints.get("total_budget", 0)
-        num_days = constraints.get("num_days", 0)
-        lines.append(
-            f"Suggestions : augmentez le budget (actuel : {budget}€), "
-            f"allongez le séjour (actuel : {num_days} jour(s)), "
-            "ou assouplissez les préférences de catégories."
-        )
-        return "\n".join(lines)
-
-    lines: list[str] = []
-    summary = solution.get("summary", {})
-    days = solution.get("days", [])
-    mode = solution.get("mode", "flexible")
-
-    if mode == "strict":
-        lines.append("Mode strict : seules les activités des catégories préférées ont été sélectionnées.")
-
-    # Budget
-    remaining = summary.get("remaining_budget", 0)
-    total_cost = summary.get("total_cost", 0)
-    budget = summary.get("budget", 0)
-    if remaining < 0:
-        lines.append(f"⚠ Budget dépassé de {abs(remaining)}€ (coût total : {total_cost}€).")
-    elif remaining < 50:
-        lines.append(
-            f"Budget quasi épuisé : {total_cost}€ dépensés sur {budget}€ ({remaining}€ restants)."
-        )
-    else:
-        lines.append(f"Budget respecté : {total_cost}€ dépensés sur {budget}€ ({remaining}€ de marge).")
-
-    # Rythme
-    num_days = len(days)
-    total_acts = sum(len(d.get("activities", [])) for d in days)
-    avg = total_acts / num_days if num_days > 0 else 0
-    pace_map = {"relaxed": 2, "moderate": 3, "intense": 4}
-    target = pace_map.get(constraints.get("preferred_pace", "moderate"), 3)
-
-    if abs(avg - target) > 0.9:
-        direction = "moins" if avg < target else "plus"
-        lines.append(
-            f"Rythme ajusté : {avg:.1f} activité(s)/jour en moyenne "
-            f"({direction} que le rythme '{constraints.get('preferred_pace', 'moderate')}' souhaité de {target}/jour). "
-            f"Raison : contraintes de budget ou d'horaires d'ouverture."
-        )
-
-    # Préférences non satisfaites
-    selected_cats = [
-        act["category"]
-        for day in days
-        for act in day.get("activities", [])
-    ]
-    for cat in constraints.get("preferred_categories", []):
-        count = selected_cats.count(cat)
-        if count == 0:
-            lines.append(
-                f"⚠ Catégorie préférée '{cat}' absente du plan. "
-                f"Causes possibles : budget insuffisant, horaires incompatibles, "
-                f"ou quota journalier déjà atteint. "
-                f"Alternative : augmentez le budget ou réduisez d'autres catégories."
-            )
-        else:
-            lines.append(f"✓ {count} activité(s) '{cat}' planifiée(s).")
-
-    # Catégories évitées présentes quand même
-    for cat in constraints.get("avoided_categories", []):
-        count = selected_cats.count(cat)
-        if count > 0:
-            lines.append(
-                f"ℹ {count} activité(s) '{cat}' incluse(s) malgré la préférence d'évitement. "
-                f"Ces activités étaient nécessaires pour respecter le minimum d'activités par jour."
-            )
-
-    # Activités obligatoires manquantes
-    selected_ids = {
-        act["id"]
-        for day in days
-        for act in day.get("activities", [])
-    }
-    for act_id in constraints.get("must_visit", []):
-        if act_id not in selected_ids:
-            lines.append(
-                f"⚠ Activité obligatoire '{act_id}' absente. "
-                f"Vérifiez que son coût et ses horaires sont compatibles avec le plan."
-            )
-
-    # Contraintes violées (depuis l'audit)
-    for v in solution.get("violated_soft_constraints", []):
-        if not any(v in line for line in lines):
-            lines.append(f"⚠ {v}")
-
-    return "\n".join(lines) if lines else "✓ Toutes les contraintes et préférences sont respectées."
-
-
-# Pour tester le solveur, utilise tests/scénarios offline qui fournissent
-# leurs propres données ville (test_solver_scenarios.py). Aucune donnée
-# n'est hardcodée dans ce module.
+# Ré-export pour compat (orchestrator importe explain_solution depuis solver).
+from solver_explain import explain_solution  # noqa: E402, F401
