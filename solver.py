@@ -814,7 +814,7 @@ def _derive_trip_weekdays(constraints):
         constraints.trip_weekdays = []
 
 def _select_hotel(city_data, cap):
-    """Hôtel le plus cher ≤ cap (le plus haut-de-gamme dans le budget). Fallback : le moins cher si aucun ne rentre. Renvoie le dict ou None."""
+    """Hôtel le plus cher ≤ cap. Fallback : le moins cher si aucun ne rentre. Renvoie le dict ou None."""
     hotels = city_data.get("hotels") or []
     if not hotels:
         return None
