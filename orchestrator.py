@@ -2,8 +2,11 @@
 User message (NL)"""
 
 from __future__ import annotations
+import logging
 import threading
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from llm_client import extract_constraints, narrate_plan
 from llm_city_provider import generate_city_data
@@ -100,45 +103,75 @@ _STRUCTURAL_FIELDS = {
     "transport_mode", "morning_preference", "destination",
 }
 
+# Champs structurels "soft" : si le LLM les ré-émet en même temps qu'une édition
+# activity-level (must_avoid / must_visit_on_day), on suppose que c'est une
+# hallucination et on ignore pour le calcul de touched_days. Si l'utilisateur
+# veut VRAIMENT changer ces champs, il devra le faire dans un tour séparé.
+_STRUCTURAL_SOFT = {
+    "preferred_categories", "avoided_categories",
+    "day_start_hour", "day_end_hour",
+    "max_activities_per_day", "min_activities_per_day",
+    "hotel_per_night", "daily_food_budget", "num_travelers",
+    "morning_preference", "preferred_pace",
+}
+
 def _determine_touched_days(extracted: dict, previous_plan: dict) -> Optional[set]:
-    """Décide quels jours (0-indexed) l'utilisateur a explicitement modifiés
-    ce tour-ci. Les autres jours seront hard-pinned dans le solveur."""
+    """Jours (0-indexed) à laisser libres au solveur. Les autres sont pinned.
+
+    Règles :
+    - Pas de plan précédent ou changement structurel → None (pas de pin).
+    - must_visit_on_day = {X: D} → touche le jour D (la cible). On NE touche PAS
+      le jour où X était avant ; il reste pinné avec ses autres activités, juste
+      sans X (qui est forcée ailleurs via la contrainte hard must_visit_on_day).
+    - must_avoid = [Y] → touche RIEN. La journée où Y était reste pinned avec
+      les autres activités ; Y est juste exclue (selected=0 hard, pas de pin
+      pour Y donc pas de conflit).
+    - must_visit nouveau (sans jour) → touche RIEN. block_new_on_pinned passera
+      à False côté solveur pour que la nouvelle activité puisse atterrir
+      sur n'importe quel jour pinned ayant de la place.
+    """
     if not previous_plan:
         return None
 
-    if _STRUCTURAL_FIELDS & set(extracted.keys()):
-        return None
+    # Si l'utilisateur fait une édition activity-level (must_avoid / must_visit_on_day),
+    # on tolère les ré-émissions structurelles "soft" (probables hallucinations LLM).
+    is_activity_edit = bool({"must_avoid", "must_visit_on_day", "must_visit"}
+                            & set(extracted.keys()))
+    if is_activity_edit:
+        hard_structural = _STRUCTURAL_FIELDS - _STRUCTURAL_SOFT
+        if hard_structural & set(extracted.keys()):
+            return None
+    else:
+        if _STRUCTURAL_FIELDS & set(extracted.keys()):
+            return None
 
     touched: set[int] = set()
-
-    for act_id, day_1based in (extracted.get("must_visit_on_day") or {}).items():
+    for _act_id, day_1based in (extracted.get("must_visit_on_day") or {}).items():
         try:
             touched.add(int(day_1based) - 1)
         except (TypeError, ValueError):
             continue
-        for d, entries in previous_plan.items():
-            for entry in entries:
-                aid = entry[0] if isinstance(entry, (list, tuple)) else entry
-                if aid == act_id:
-                    touched.add(d)
+    return touched
 
-    for act_id in (extracted.get("must_avoid") or []):
-        for d, entries in previous_plan.items():
-            for entry in entries:
-                aid = entry[0] if isinstance(entry, (list, tuple)) else entry
-                if aid == act_id:
-                    touched.add(d)
 
+def _has_new_must_visit(extracted: dict, previous_plan: dict) -> bool:
+    """Vrai si l'utilisateur ajoute une nouvelle activité sans préciser de jour.
+    Dans ce cas, block_new_on_pinned doit passer à False pour permettre au
+    solveur de placer la nouvelle activité sur un jour pinned."""
+    if not previous_plan:
+        return False
     existing = set()
     for entries in previous_plan.values():
         for entry in entries:
             aid = entry[0] if isinstance(entry, (list, tuple)) else entry
             existing.add(aid)
+    # Activités ciblées par must_visit_on_day : la cible est déjà touched →
+    # l'activité atterrira sur un jour libre, pas besoin de relâcher le block.
+    pinned_target = set((extracted.get("must_visit_on_day") or {}).keys())
     for act_id in (extracted.get("must_visit") or []):
-        if act_id not in existing:
-            return None
-
-    return touched
+        if act_id not in existing and act_id not in pinned_target:
+            return True
+    return False
 
 DICT_FIELDS = {
     "must_visit_on_day",
@@ -151,29 +184,68 @@ INCOMPATIBLE_PAIRS = [
     ("must_visit", "must_avoid"),
 ]
 
-def _strip_default_reemissions(extracted: dict, current: dict) -> dict:
+def _is_noop_update(value, current_value) -> bool:
+    """Vrai si l'update n'apporte aucun changement par rapport à l'état courant.
+    Tient compte des types : sets/lists comparées comme sous-ensemble,
+    dicts comparées clé-par-clé."""
+    if isinstance(value, list) and isinstance(current_value, list):
+        return set(value).issubset(set(current_value))
+    if isinstance(value, dict) and isinstance(current_value, dict):
+        return all(current_value.get(k) == v for k, v in value.items())
+    return current_value == value
+
+
+_INTENT_KEYWORDS = {
+    "preferred_pace": ("rythme", "intense", "tranquille", "relaxed", "modere", "moderate", "calme", "rapide"),
+    "preferred_categories": ("culture", "gastro", "nature", "shopping", "nightlife", "musee", "musée", "restau", "parc"),
+    "avoided_categories": ("evite", "évite", "pas de", "sans"),
+    "day_start_hour": ("commence", "debut", "début", "commencer", "matin"),
+    "day_end_hour": ("finir", "fin", "soir", "arrete", "arrête"),
+    "max_activities_per_day": ("max", "maximum", "pas plus", "moins d", "fatigu"),
+    "min_activities_per_day": ("min", "minimum", "au moins", "plus d"),
+    "num_travelers": ("voyageur", "personne", "couple", "famille", "ami", "duo", "trio"),
+    "hotel_per_night": ("hotel", "hôtel", "nuit"),
+    "daily_food_budget": ("nourriture", "repas", "manger", "deli"),
+    "morning_preference": ("matin", "morning"),
+    "num_days": ("jour", "day", "semaine", "weekend", "week-end"),
+    "total_budget": ("budget", "euros", "€"),
+    "transport_mode": ("pied", "marche", "velo", "vélo", "voiture", "transport", "bus"),
+}
+
+def _user_mentions(key: str, user_message: str) -> bool:
+    if not user_message:
+        return False
+    msg = user_message.lower()
+    return any(kw in msg for kw in _INTENT_KEYWORDS.get(key, ()))
+
+def _strip_default_reemissions(extracted: dict, current: dict,
+                                user_message: str = "") -> dict:
     """Filtre défensif contre les ré-émissions parasites du LLM.
-    Problème : quand l'utilisateur fait une édition activity-level (ex:"""
+
+    Pendant une édition activity-level (must_visit*, must_avoid), un champ
+    structurel n'est conservé que si :
+      - sa nouvelle valeur diffère vraiment de l'état actuel, ET
+      - l'utilisateur l'a mentionné explicitement (mot-clé associé).
+    Sinon on l'écarte — c'est une hallucination LLM qui casserait le pinning.
+    """
     activity_level_keys = {"must_visit", "must_visit_on_day", "must_avoid"}
     is_activity_edit = bool(activity_level_keys & set(extracted.keys()))
     if not is_activity_edit:
         return extracted
 
-    suspect_defaults = {
-        "num_travelers": 1,
-        "hotel_per_night": 100,
-        "daily_food_budget": 60,
-        "min_activities_per_day": 1,
-        "max_activities_per_day": 6,
-    }
-    cleaned = dict(extracted)
-    for field, suspect_val in suspect_defaults.items():
-        if field not in cleaned:
+    cleaned: dict = {}
+    for key, value in extracted.items():
+        if key in activity_level_keys:
+            cleaned[key] = value
             continue
-        extracted_val = cleaned[field]
-        current_val = current.get(field)
-        if extracted_val == suspect_val and current_val not in (None, suspect_val):
-            del cleaned[field]
+        cur = current.get(key)
+        if _is_noop_update(value, cur):
+            continue
+        # Si l'utilisateur n'a pas mentionné le champ (mots-clés associés
+        # absents du message), on suppose hallucination LLM et on strip.
+        if key in _INTENT_KEYWORDS and not _user_mentions(key, user_message):
+            continue
+        cleaned[key] = value
     return cleaned
 
 def _is_invalid_critical_update(key: str, value) -> bool:
@@ -275,6 +347,16 @@ def _build_plan_summary(session_id: str, current: dict) -> Optional[str]:
     summary = f"{total} activités sur {num_days} jours (~{avg:.1f}/jour)"
     if cat_str:
         summary += f", dont {cat_str}"
+
+    # Liste explicite des noms : le LLM doit les ré-utiliser tels quels dans must_avoid/must_visit
+    if city_data:
+        names = [
+            (acts_by_id.get(aid) or {}).get("name")
+            for aid in flat_ids
+        ]
+        names = [n for n in names if n]
+        if names:
+            summary += ". Activités actuellement planifiées : " + " | ".join(names)
     return summary
 
 def handle_turn(
@@ -302,7 +384,7 @@ def handle_turn(
         plan_summary=plan_summary,
     )
     extraction_ms = int((time.time() - t_ex) * 1000)
-    extracted = _strip_default_reemissions(extracted, current)
+    extracted = _strip_default_reemissions(extracted, current, user_message)
     if extract_err:
         errors.append(f"llm_extract: {extract_err}")
 
@@ -342,7 +424,9 @@ def handle_turn(
                 if vague_fields.get(f):
                     next_field = f
                     break
-        _store.set_meta(session_id, {"pending_field": next_field})
+        meta_upd = _store.get_meta(session_id)
+        meta_upd["pending_field"] = next_field
+        _store.set_meta(session_id, meta_upd)
 
         missing_info = format_missing_summary(merged)
         errors.append(f"incomplete_constraints: {missing_info}")
@@ -357,7 +441,9 @@ def handle_turn(
             "explanation": None,
         }
 
-    _store.set_meta(session_id, {"pending_field": None})
+    new_meta = _store.get_meta(session_id)
+    new_meta["pending_field"] = None
+    _store.set_meta(session_id, new_meta)
 
     destination = merged.get("destination", "Rome")
     effective_transport = transport_mode or merged.get("transport_mode") or "foot"
@@ -392,14 +478,24 @@ def handle_turn(
     prev_meta = _store.get_meta(session_id)
     previous_plan = None
     touched_days = None
+    block_new_on_pinned = True
     if (prev_meta.get("last_destination") == destination
             and prev_meta.get("last_plan")):
         previous_plan = prev_meta["last_plan"]
         touched_days = _determine_touched_days(extracted, previous_plan)
+        if _has_new_must_visit(extracted, previous_plan):
+            block_new_on_pinned = False
+
+    logger.info(
+        "[Orch] user=%r | extracted=%s | touched_days=%s | block_new=%s | has_prev_plan=%s",
+        user_message, extracted, touched_days, block_new_on_pinned,
+        bool(previous_plan),
+    )
 
     plan = solve_with_city_data(
         merged, city_data, time_limit_seconds=solve_timeout, mode=mode,
         previous_plan=previous_plan, touched_days=touched_days,
+        block_new_on_pinned=block_new_on_pinned,
     )
 
     if plan and plan.get("status") in ("OPTIMAL", "FEASIBLE"):

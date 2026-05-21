@@ -1,12 +1,15 @@
 """Solveur CP-SAT (8 types de contraintes) + entrypoint solve_with_city_data. Modèles de domaine → solver_models.py"""
 from __future__ import annotations
 
+import logging
 from ortools.sat.python import cp_model
 from typing import Optional
 
 from solver_models import (
     Activity, TravelConstraints, dict_to_activity, haversine_meters,
 )
+
+logger = logging.getLogger(__name__)
 
 class TravelPlannerSolver:
     """Solveur CP-SAT pour la planification de voyage. Variables : `assign[a,d]` BoolVar (activité a assignée au jour d),"""
@@ -25,6 +28,7 @@ class TravelPlannerSolver:
         transport_mode: str = "foot",
         previous_plan: Optional[dict[int, list]] = None,
         touched_days: Optional[set[int]] = None,
+        block_new_on_pinned: bool = True,
     ):
         self.activities = {a.id: a for a in activities}
         self.constraints = constraints
@@ -32,6 +36,9 @@ class TravelPlannerSolver:
         self._transport_mode = transport_mode
         self._previous_plan = previous_plan or {}
         self._touched_days = touched_days
+        # Si False : on autorise une nouvelle activité sur un jour pinned
+        # (cas "ajoute X" sans jour précisé → X doit pouvoir atterrir quelque part).
+        self._block_new_on_pinned = block_new_on_pinned
         self.model = cp_model.CpModel()
 
         self._act_order = [a.id for a in activities]
@@ -163,19 +170,63 @@ class TravelPlannerSolver:
                     self.start[a_id, d] + dur_slots <= eff_end
                 ).only_enforce_if(self.assign[a_id, d])
 
+    _STOPWORDS = frozenset([
+        "le", "la", "les", "l", "de", "du", "des", "d", "un", "une",
+        "the", "a", "an", "of", "to", "and", "et",
+    ])
+
+    @staticmethod
+    def _norm_name(s: str) -> str:
+        import re as _re
+        import unicodedata as _ud
+        s = (s or "").lower().strip()
+        s = s.replace("œ", "oe").replace("æ", "ae")
+        s = "".join(c for c in _ud.normalize("NFD", s) if _ud.category(c) != "Mn")
+        s = _re.sub(r"[^\w\s]", " ", s)
+        return _re.sub(r"\s+", " ", s).strip()
+
+    def _tokens(self, s: str) -> list[str]:
+        return [t for t in self._norm_name(s).split() if t not in self._STOPWORDS]
+
     def _resolve_activity(self, name_or_id: str) -> Optional[str]:
-        """Résout un nom/ID utilisateur vers l'ID interne (exact > sous-chaîne)."""
+        """Résout un nom/ID utilisateur vers l'ID interne (exact > tokens > sous-chaîne > fuzzy)."""
+        from difflib import SequenceMatcher
+
         if name_or_id in self.activities:
             return name_or_id
-        term = name_or_id.lower().strip()
+        term = self._norm_name(name_or_id)
+        if not term:
+            return None
+
+        # Match exact normalisé.
         for a_id, act in self.activities.items():
-            if act.name.lower() == term:
+            if self._norm_name(act.name) == term:
                 return a_id
+
+        # Match par tokens : tous les tokens significatifs du query présents dans le nom.
+        q_tokens = self._tokens(name_or_id)
+        if q_tokens:
+            for a_id, act in self.activities.items():
+                a_tokens = set(self._tokens(act.name))
+                if all(t in a_tokens for t in q_tokens):
+                    return a_id
+
+        # Sous-chaîne normalisée.
         if len(term) >= 4:
             for a_id, act in self.activities.items():
-                name_l = act.name.lower()
+                name_l = self._norm_name(act.name)
                 if term in name_l or name_l in term:
                     return a_id
+
+        # Fuzzy SequenceMatcher en dernier recours, seuil 0.75.
+        best_id, best_score = None, 0.0
+        for a_id, act in self.activities.items():
+            score = SequenceMatcher(None, term, self._norm_name(act.name)).ratio()
+            if score > best_score:
+                best_id, best_score = a_id, score
+        if best_score >= 0.75:
+            return best_id
+
         return None
 
     def _add_logical_constraints(self):
@@ -204,6 +255,12 @@ class TravelPlannerSolver:
             a_id = self._resolve_activity(name_or_id)
             if a_id:
                 self.model.add(self.selected[a_id] == 0)
+            else:
+                logger.warning(
+                    "[Solver] must_avoid '%s' n'a pas pu être résolu vers une activité "
+                    "du pool — l'utilisateur va voir l'activité rester dans le plan.",
+                    name_or_id,
+                )
 
         for a1, a2 in C.incompatible_pairs:
             for d in range(C.num_days):
@@ -463,24 +520,42 @@ class TravelPlannerSolver:
                         self.assign[act_id, day_idx] * STABILITY_WEIGHT)
 
     def _add_pin_constraints(self):
-        """Pin HARD des jours NON touchés par le tour : assign + start figés, autres activités interdites. touched_days = None ⇒ pas de pin."""
+        """Pin HARD des jours non touchés. On NE pin PAS les activités que
+        l'utilisateur veut déplacer (must_visit_on_day) ou retirer (must_avoid),
+        car ça créerait un conflit hard avec leurs propres contraintes."""
         if self._touched_days is None or not self._previous_plan:
             return
+
+        # Activités à ne pas pin (elles sont en mouvement ou en sortie)
+        skip_pin: set[str] = set()
+        for name_or_id in self.constraints.must_avoid:
+            a_id = self._resolve_activity(name_or_id)
+            if a_id:
+                skip_pin.add(a_id)
+        for name_or_id in self.constraints.must_visit_on_day:
+            a_id = self._resolve_activity(name_or_id)
+            if a_id:
+                skip_pin.add(a_id)
+
         for day_idx, entries in self._previous_plan.items():
             if day_idx in self._touched_days:
                 continue
             pinned_ids: set[str] = set()
             for act_id, slot in self._iter_prev_plan(entries):
+                if act_id in skip_pin:
+                    continue
                 if (act_id, day_idx) in self.assign:
                     self.model.add(self.assign[act_id, day_idx] == 1)
                     if slot is not None and (act_id, day_idx) in self.start:
                         self.model.add(self.start[act_id, day_idx] == int(slot))
                     pinned_ids.add(act_id)
-            for a_id in self.activities:
-                if a_id in pinned_ids:
-                    continue
-                if (a_id, day_idx) in self.assign:
-                    self.model.add(self.assign[a_id, day_idx] == 0)
+            # Bloquer les nouvelles activités sauf si block_new_on_pinned=False
+            if self._block_new_on_pinned:
+                for a_id in self.activities:
+                    if a_id in pinned_ids:
+                        continue
+                    if (a_id, day_idx) in self.assign:
+                        self.model.add(self.assign[a_id, day_idx] == 0)
 
     def _set_objective(self):
         total_bonus = sum(self.soft_bonuses) if self.soft_bonuses else 0
@@ -734,6 +809,7 @@ def solve_with_city_data(
     mode: str = "flexible",
     previous_plan: Optional[dict[int, list]] = None,
     touched_days: Optional[set[int]] = None,
+    block_new_on_pinned: bool = True,
 ) -> dict:
     """Entrypoint principal : consomme un city_data, renvoie le plan complet."""
     constraints = TravelConstraints(**{
@@ -768,6 +844,7 @@ def solve_with_city_data(
         activities, constraints,
         travel_matrix=travel_matrix, mode=mode, transport_mode=transport_mode,
         previous_plan=previous_plan, touched_days=touched_days,
+        block_new_on_pinned=block_new_on_pinned,
     )
     result = planner.solve(time_limit_seconds=time_limit_seconds)
 

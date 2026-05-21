@@ -336,6 +336,16 @@ def generate_city_data(
     city_lat = data["city"]["latitude"]
     city_lon = data["city"]["longitude"]
 
+    try:
+        from opentripmap_client import verify_activities
+        data["activities"], data["otm_stats"] = verify_activities(
+            data["activities"], city_name, city_lat, city_lon,
+        )
+    except Exception as e:
+        logger.warning("[LLMCity] Verification OTM ignoree : %s", e)
+        data["otm_stats"] = {"verified": 0, "total": len(data["activities"]),
+                             "skipped": True}
+
     _assign_zones(data["activities"], city_lat, city_lon)
 
     matrix = _compute_travel_matrix(data["activities"], transport_mode)
@@ -344,7 +354,7 @@ def generate_city_data(
 
     data["travel_matrix"] = matrix
     data["transport_mode"] = transport_mode
-    data["data_source"] = "llm+osrm"
+    data["data_source"] = "llm+otm+osrm"
 
     confs = [a.get("confidence", 0.0) for a in data["activities"]]
     data["confidence_stats"] = {

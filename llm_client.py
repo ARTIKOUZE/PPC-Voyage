@@ -220,6 +220,18 @@ User: "I absolutely want to see the Colosseum"
 User: "Je veux faire le Louvre le jour 3"
 → {"must_visit":["louvre"],"must_visit_on_day":{"louvre":3}}
 
+User: "retire la Tour Eiffel"
+→ {"must_avoid":["tour eiffel"]}
+
+User: "enlève le Louvre du séjour"
+→ {"must_avoid":["louvre"]}
+
+User: "je ne veux plus aller à Notre-Dame"
+→ {"must_avoid":["notre-dame"]}
+
+User: "supprime l'activité du musée d'Orsay"
+→ {"must_avoid":["musée d'orsay"]}
+
 User: "Can you add the Eiffel Tower on day 1?"
 → {"must_visit":["eiffel tower"],"must_visit_on_day":{"eiffel tower":1}}
 
