@@ -259,7 +259,7 @@ function TimelineActivity({ activity, travelers }) {
         }}>
           <span>{activity.duration_hours ?? activity.duration}h</span>
           {!activity.address && activity.zone && <span>📍 {activity.zone}</span>}
-          {cost > 0 && <span>{cost * (travelers || 1)}€</span>}
+          {cost > 0 && <span>{cost}€</span>}
           {cost === 0 && <span style={{ color: "#2E5C2E" }}>Gratuit</span>}
         </div>
       </div>
@@ -450,7 +450,7 @@ export default function TravelPlannerApp() {
   const [sessionId] = useState(() => `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const [messages, setMessages] = useState([{
     role: "assistant",
-    content: "Ciao ! 🇮🇹 Dis-moi ce que tu veux planifier : ville, jours, budget, centres d'intérêt… et mon solveur CP-SAT t'optimise tout ça.",
+    content: "Bonjour, je suis votre assistant de planification, comment puis-je vous aider à planifier votre séjour ?",
   }]);
   const [input, setInput] = useState("");
   const [constraints, setConstraints] = useState(null);
