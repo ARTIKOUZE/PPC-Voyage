@@ -1,0 +1,204 @@
+<!doctype html><html lang='fr'><head><meta charset='utf-8'>
+<title>Expressivite NL vs Formulaire — diff JSON</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --bg-form: #EBF1FB; --bg-nl: #FBF3E8;
+    --txt: #2b2b2b; --muted: #8a8a8a; --line: #e8e3db;
+    --advantage: #b8860b; --soft: #2e7d32; --neutral: #6b6b6b;
+    --diff-nl: #fff8e1; --diff-form: #ffebee;
+  }
+  body { font-family: -apple-system, sans-serif; max-width: 1300px;
+         margin: 24px auto; padding: 0 20px; color: var(--txt); background: var(--bg); }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 24px; }
+  .metric-row { display: grid; grid-template-columns: repeat(4, 1fr);
+                 gap: 12px; margin-bottom: 28px; }
+  .metric { padding: 16px; background: white; border: 1px solid var(--line);
+             border-radius: 12px; }
+  .metric .v { font-size: 28px; font-weight: 700; }
+  .metric .l { font-size: 10px; color: var(--muted); text-transform: uppercase;
+                letter-spacing: 0.8px; margin-bottom: 4px; }
+  .scenario { background: white; border: 1px solid var(--line);
+               border-radius: 12px; padding: 20px; margin-bottom: 18px; }
+  .hdr { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .id { font-family: 'DM Mono', monospace; font-weight: 700; font-size: 14px; }
+  .tag { font-size: 10px; padding: 2px 8px; background: #f1ede5;
+          border-radius: 10px; text-transform: uppercase;
+          letter-spacing: 0.5px; color: #555; }
+  .badge { font-size: 11px; padding: 3px 10px; border-radius: 12px; margin-left: auto; }
+  .badge.advantage { color: var(--advantage); background: #fff8e1; }
+  .badge.soft { color: var(--soft); background: #e8f5e9; }
+  .badge.neutral { color: var(--neutral); background: #f5f5f5; }
+  .msg { font-style: italic; color: #555; padding: 10px 14px;
+          background: #faf7f2; border-radius: 8px; margin-bottom: 8px; }
+  .explanation { font-size: 12px; color: #777; margin-bottom: 14px;
+                  padding-left: 10px; border-left: 3px solid var(--line); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .col { padding: 14px; border-radius: 8px; }
+  .col-form { background: var(--bg-form); }
+  .col-nl { background: var(--bg-nl); }
+  .col-title { font-weight: 600; font-size: 12px; margin-bottom: 8px;
+                text-transform: uppercase; letter-spacing: 0.5px; }
+  pre { font-family: 'DM Mono', 'Courier New', monospace; font-size: 11px;
+         margin: 0; white-space: pre-wrap; word-break: break-word; }
+  .diff-nl { background: var(--diff-nl); padding: 1px 4px; border-radius: 3px;
+              border-left: 3px solid var(--advantage); display: inline-block; }
+  .diff-form { background: var(--diff-form); padding: 1px 4px; border-radius: 3px;
+                border-left: 3px solid #c62828; display: inline-block; }
+  .takeaway { margin-top: 30px; padding: 20px; background: white;
+               border-left: 4px solid var(--advantage); border-radius: 8px; }
+  .takeaway li { margin: 6px 0; }
+</style></head><body>
+
+<h1>Expressivite Langage Naturel vs Formulaire</h1>
+<div class='sub'>6 scenarios — comparaison purement structurelle (extraction LLM seule, pas de solveur)</div>
+
+<div class='metric-row'>
+  <div class='metric'><div class='l'>Scenarios testes</div><div class='v'>6</div></div>
+  <div class='metric'><div class='l'>Scenarios avec avantage NL</div><div class='v'>3/6</div></div>
+  <div class='metric'><div class='l'>Champs NL-only stricts</div><div class='v'>6</div></div>
+  <div class='metric'><div class='l'>Latence extraction LLM</div><div class='v'>1511 ms</div></div>
+</div>
+
+<p style='color:#777; font-size:13px;'>
+<strong>Comment lire :</strong> chaque carte montre un scenario avec son message NL, ce qu'un
+<strong>formulaire</strong> permettrait de capturer (gauche), et ce que le <strong>LLM extrait</strong>
+du message (droite). Les cles surlignees en <span class='diff-nl'>jaune</span> sont des champs que
+le NL capture mais pas le formulaire — ces contraintes seraient <strong>perdues</strong> avec un
+formulaire classique.
+</p>
+
+
+        <div class='scenario'>
+          <div class='hdr'>
+            <span class='id'>S1-baseline</span>
+            <span class='tag'>aucune</span>
+            <strong class='badge neutral'>Egalite — exprimable des deux cotes</strong>
+          </div>
+          <div class='msg'>« 5 jours a Rome avec 2000€ pour 2 personnes, on aime la culture, du 12 au 16 juin 2026 »</div>
+          <div class='explanation'>Cas trivial : tout est exprimable des deux cotes. Sert de baseline.</div>
+          <div class='cols'>
+            <div class='col col-form'>
+              <div class='col-title'>📋 Formulaire (form_input)</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Rome&quot;,</span><br>  <span><strong>"num_days"</strong>: 5,</span><br>  <span><strong>"total_budget"</strong>: 2000,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-12&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-16&quot;,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;culture&quot;]</span><br>}</pre>
+            </div>
+            <div class='col col-nl'>
+              <div class='col-title'>💬 NL extraction (LLM) — 1454 ms</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Rome&quot;,</span><br>  <span><strong>"num_days"</strong>: 5,</span><br>  <span><strong>"total_budget"</strong>: 2000,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;culture&quot;],</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-12&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-16&quot;</span><br>}</pre>
+            </div>
+          </div>
+        </div>
+        <div class='scenario'>
+          <div class='hdr'>
+            <span class='id'>S2-activite-au-jour</span>
+            <span class='tag'>objet imbrique activite -&gt; jour</span>
+            <strong class='badge advantage'>NL capture 2 contrainte(s) inexprimables</strong>
+          </div>
+          <div class='msg'>« Lisbonne 4 jours 1500€ du 10 au 13 juin 2026 pour 2, je veux faire la Tour de Belem le jour 3 »</div>
+          <div class='explanation'>L&#x27;utilisateur EPINGLE une activite a un jour precis. Le formulaire devrait offrir un widget &#x27;activite -&gt; jour&#x27; dont la liste d&#x27;activites n&#x27;est connue qu&#x27;apres generation.</div>
+          <div class='cols'>
+            <div class='col col-form'>
+              <div class='col-title'>📋 Formulaire (form_input)</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Lisbonne&quot;,</span><br>  <span><strong>"num_days"</strong>: 4,</span><br>  <span><strong>"total_budget"</strong>: 1500,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-10&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-13&quot;</span><br>}</pre>
+            </div>
+            <div class='col col-nl'>
+              <div class='col-title'>💬 NL extraction (LLM) — 1650 ms</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Lisbonne&quot;,</span><br>  <span><strong>"num_days"</strong>: 4,</span><br>  <span><strong>"total_budget"</strong>: 1500,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span class='diff-nl'><strong>"must_visit"</strong>: [&quot;tour de belem&quot;],</span><br>  <span class='diff-nl'><strong>"must_visit_on_day"</strong>: {&quot;tour de belem&quot;: 3},</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-10&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-13&quot;</span><br>}</pre>
+            </div>
+          </div>
+        </div>
+        <div class='scenario'>
+          <div class='hdr'>
+            <span class='id'>S3-inclusion-exclusion</span>
+            <span class='tag'>inclusion + exclusion nommees</span>
+            <strong class='badge advantage'>NL capture 2 contrainte(s) inexprimables</strong>
+          </div>
+          <div class='msg'>« Tokyo 6 jours 3500€ du 5 au 10 juin 2026 pour 2, on veut voir le sanctuaire Senso-ji et eviter Shibuya »</div>
+          <div class='explanation'>Inclusion ET exclusion d&#x27;activites nommees. Formulaire = il faudrait deux text-areas libres sans validation, sans completion, sans coherence.</div>
+          <div class='cols'>
+            <div class='col col-form'>
+              <div class='col-title'>📋 Formulaire (form_input)</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Tokyo&quot;,</span><br>  <span><strong>"num_days"</strong>: 6,</span><br>  <span><strong>"total_budget"</strong>: 3500,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-05&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-10&quot;</span><br>}</pre>
+            </div>
+            <div class='col col-nl'>
+              <div class='col-title'>💬 NL extraction (LLM) — 995 ms</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Tokyo&quot;,</span><br>  <span><strong>"num_days"</strong>: 6,</span><br>  <span><strong>"total_budget"</strong>: 3500,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span class='diff-nl'><strong>"must_visit"</strong>: [&quot;sanctuaire senso-ji&quot;],</span><br>  <span class='diff-nl'><strong>"must_avoid"</strong>: [&quot;shibuya&quot;],</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-05&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-10&quot;</span><br>}</pre>
+            </div>
+          </div>
+        </div>
+        <div class='scenario'>
+          <div class='hdr'>
+            <span class='id'>S4-negation-categorie</span>
+            <span class='tag'>negations en chaine</span>
+            <strong class='badge neutral'>Egalite — exprimable des deux cotes</strong>
+          </div>
+          <div class='msg'>« Madrid 4 jours 1800€ du 1 au 4 juin 2026 pour 2, on aime la gastro mais pas le shopping ni le nightlife »</div>
+          <div class='explanation'>Cas ou les deux gagnent. Le formulaire peut le faire avec 2 multi-select. Important pour montrer qu&#x27;on ne pretend pas que le NL est superieur partout.</div>
+          <div class='cols'>
+            <div class='col col-form'>
+              <div class='col-title'>📋 Formulaire (form_input)</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Madrid&quot;,</span><br>  <span><strong>"num_days"</strong>: 4,</span><br>  <span><strong>"total_budget"</strong>: 1800,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-01&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-04&quot;,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;gastro&quot;],</span><br>  <span><strong>"avoided_categories"</strong>: [&quot;shopping&quot;, &quot;nightlife&quot;]</span><br>}</pre>
+            </div>
+            <div class='col col-nl'>
+              <div class='col-title'>💬 NL extraction (LLM) — 921 ms</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Madrid&quot;,</span><br>  <span><strong>"num_days"</strong>: 4,</span><br>  <span><strong>"total_budget"</strong>: 1800,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;gastro&quot;],</span><br>  <span><strong>"avoided_categories"</strong>: [&quot;shopping&quot;, &quot;nightlife&quot;],</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-01&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-04&quot;</span><br>}</pre>
+            </div>
+          </div>
+        </div>
+        <div class='scenario'>
+          <div class='hdr'>
+            <span class='id'>S5-date-implicite</span>
+            <span class='tag'>duree implicite via expression de date</span>
+            <strong class='badge soft'>NL capture 3 champ(s) que le user n'a pas saisi</strong>
+          </div>
+          <div class='msg'>« Amsterdam le week-end du 14 juin 2026, 600€, 2 personnes, on aime la culture »</div>
+          <div class='explanation'>&#x27;week-end du 14 juin&#x27; = num_days=2 + start_date=samedi 14 juin + end_date=dimanche 15 juin. Le LLM doit calculer 3 valeurs depuis 1 expression. Formulaire = 3 champs a remplir manuellement.</div>
+          <div class='cols'>
+            <div class='col col-form'>
+              <div class='col-title'>📋 Formulaire (form_input)</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Amsterdam&quot;,</span><br>  <span><strong>"total_budget"</strong>: 600,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;culture&quot;]</span><br>}</pre>
+            </div>
+            <div class='col col-nl'>
+              <div class='col-title'>💬 NL extraction (LLM) — 1860 ms</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Amsterdam&quot;,</span><br>  <span class='diff-nl'><strong>"num_days"</strong>: 2,</span><br>  <span><strong>"total_budget"</strong>: 600,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;culture&quot;],</span><br>  <span class='diff-nl'><strong>"start_date"</strong>: &quot;2026-06-13&quot;,</span><br>  <span class='diff-nl'><strong>"end_date"</strong>: &quot;2026-06-14&quot;</span><br>}</pre>
+            </div>
+          </div>
+        </div>
+        <div class='scenario'>
+          <div class='hdr'>
+            <span class='id'>S6-compound-multi-axe</span>
+            <span class='tag'>compose multi-contraintes en 1 phrase</span>
+            <strong class='badge advantage'>NL capture 2 contrainte(s) inexprimables</strong>
+          </div>
+          <div class='msg'>« 4 jours a Vienne du 18 au 21 juin 2026 pour 2 personnes, 2200€, on veut absolument l&#x27;opera de Vienne le jour 1 au soir, on adore la musique et la gastro, on evite les musees, et on commence pas avant 10h »</div>
+          <div class='explanation'>UNE phrase NL = 7 contraintes distinctes a remplir manuellement dans 7 champs differents du formulaire. Le NL traite tout en une seule extraction.</div>
+          <div class='cols'>
+            <div class='col col-form'>
+              <div class='col-title'>📋 Formulaire (form_input)</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Vienne&quot;,</span><br>  <span><strong>"num_days"</strong>: 4,</span><br>  <span><strong>"total_budget"</strong>: 2200,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-18&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-21&quot;,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;culture&quot;, &quot;gastro&quot;],</span><br>  <span><strong>"avoided_categories"</strong>: [],</span><br>  <span><strong>"day_start_hour"</strong>: 10</span><br>}</pre>
+            </div>
+            <div class='col col-nl'>
+              <div class='col-title'>💬 NL extraction (LLM) — 2185 ms</div>
+              <pre>{<br>  <span><strong>"destination"</strong>: &quot;Vienne&quot;,</span><br>  <span><strong>"num_days"</strong>: 4,</span><br>  <span><strong>"total_budget"</strong>: 2200,</span><br>  <span><strong>"num_travelers"</strong>: 2,</span><br>  <span><strong>"preferred_categories"</strong>: [&quot;culture&quot;, &quot;gastro&quot;],</span><br>  <span><strong>"avoided_categories"</strong>: [&quot;culture&quot;],</span><br>  <span class='diff-nl'><strong>"must_visit"</strong>: [&quot;opera de vienne&quot;],</span><br>  <span class='diff-nl'><strong>"must_visit_on_day"</strong>: {&quot;opera de vienne&quot;: 1},</span><br>  <span><strong>"day_start_hour"</strong>: 10,</span><br>  <span><strong>"start_date"</strong>: &quot;2026-06-18&quot;,</span><br>  <span><strong>"end_date"</strong>: &quot;2026-06-21&quot;</span><br>}</pre>
+            </div>
+          </div>
+        </div>
+
+<div class='takeaway'>
+<strong>Lecture des resultats</strong>
+<ul>
+  <li><strong>3/6 scenarios</strong> contiennent au moins une contrainte
+      <em>strictement</em> inexprimable en formulaire (must_visit, must_visit_on_day,
+      day_specific_*_hour, must_avoid…).</li>
+  <li>Au total, <strong>6 champs NL-only stricts</strong> sont captures par
+      le LLM dans ces messages, contre <strong>0</strong> par le formulaire.</li>
+  <li>L'extraction LLM coute en moyenne <strong>1511 ms</strong> par message —
+      negligeable face au temps de remplissage manuel d'un formulaire equivalent (15-60s).</li>
+  <li>Le formulaire reste valide pour le sous-ensemble des contraintes structurees
+      (destination, dates, budget, categories), mais montre ses limites des qu'on touche
+      aux contraintes <strong>relationnelles</strong> (activite-jour) ou <strong>conditionnelles</strong>
+      (override par jour de semaine).</li>
+</ul>
+</div>
+
+</body></html>

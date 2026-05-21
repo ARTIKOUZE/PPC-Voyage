@@ -227,7 +227,9 @@
         "destination": "Florence",
         "num_days": 6,
         "total_budget": 1200,
-        "num_travelers": 2
+        "num_travelers": 2,
+        "end_date": "2026-03-08",
+        "start_date": "2026-03-03"
       }
     },
     {
@@ -259,6 +261,182 @@
         "num_days": 5,
         "total_budget": 2500,
         "day_start_hour": 11
+      }
+    },
+    {
+      "id": "adversarial-06",
+      "category": "adversarial",
+      "message": "Trois mille cinq cents euros pour aller à Athènes pendant six jours, on est deux",
+      "expected": {
+        "destination": "Athènes",
+        "num_days": 6,
+        "total_budget": 3500,
+        "num_travelers": 2
+      }
+    },
+    {
+      "id": "adversarial-07",
+      "category": "adversarial",
+      "message": "On part à Vienne, je dirais cinq jours, ah non plutôt sept jours finalement, avec 2800€",
+      "expected": {
+        "destination": "Vienne",
+        "num_days": 7,
+        "total_budget": 2800
+      }
+    },
+    {
+      "id": "adversarial-08",
+      "category": "adversarial",
+      "message": "Bruxelles 3 jours, 1200 euros environ, en gros entre 1100 et 1300",
+      "expected": {
+        "destination": "Bruxelles",
+        "num_days": 3,
+        "total_budget": 1200
+      }
+    },
+    {
+      "id": "adversarial-09",
+      "category": "adversarial",
+      "message": "Trip to Edinburgh, 4 days, budget 1800 euros, we love whisky tastings and history",
+      "expected": {
+        "destination": "Edinburgh",
+        "num_days": 4,
+        "total_budget": 1800,
+        "preferred_categories": ["gastro", "culture"]
+      }
+    },
+    {
+      "id": "adversarial-10",
+      "category": "adversarial",
+      "message": "Helsinki, 5 jours, 2k€, on est un couple, on aime tout sauf le shopping",
+      "expected": {
+        "destination": "Helsinki",
+        "num_days": 5,
+        "total_budget": 2000,
+        "num_travelers": 2,
+        "avoided_categories": ["shopping"]
+      }
+    },
+    {
+      "id": "complex-02",
+      "category": "complex",
+      "message": "Vienne 4 jours du 18 au 21 juin 2026, on est 2 avec 2200€, on veut absolument l'opéra de Vienne le jour 1 et le château de Schönbrunn le jour 3, on adore la musique mais on évite les musées modernes, et on commence pas avant 10h",
+      "expected": {
+        "destination": "Vienne",
+        "num_days": 4,
+        "total_budget": 2200,
+        "num_travelers": 2,
+        "start_date": "2026-06-18",
+        "end_date": "2026-06-21",
+        "must_visit": ["opéra de vienne", "château de schönbrunn"],
+        "must_visit_on_day": {"opéra de vienne": 1, "château de schönbrunn": 3},
+        "preferred_categories": ["culture"],
+        "day_start_hour": 10
+      }
+    },
+    {
+      "id": "complex-03",
+      "category": "complex",
+      "message": "Marrakech 5 jours du 10 au 14 mai 2026, 1500€ pour 2, le matin on veut visiter les souks et les palais, l'après-midi rien de fatigant, le soir on aime sortir",
+      "expected": {
+        "destination": "Marrakech",
+        "num_days": 5,
+        "total_budget": 1500,
+        "num_travelers": 2,
+        "start_date": "2026-05-10",
+        "end_date": "2026-05-14",
+        "preferred_categories": ["culture", "shopping", "nightlife"],
+        "morning_preference": "culture"
+      }
+    },
+    {
+      "id": "conditional-03",
+      "category": "conditional",
+      "message": "Paris 6 jours du 1 au 6 juillet 2026 pour 2, 3000€, le Louvre le jour 2 et le musée d'Orsay le jour 4, et on veut finir tôt le dimanche, vers 17h",
+      "expected": {
+        "destination": "Paris",
+        "num_days": 6,
+        "total_budget": 3000,
+        "num_travelers": 2,
+        "start_date": "2026-07-01",
+        "end_date": "2026-07-06",
+        "must_visit": ["louvre", "musée d'orsay"],
+        "must_visit_on_day": {"louvre": 2, "musée d'orsay": 4},
+        "day_specific_end_hour": {"5": 17}
+      }
+    },
+    {
+      "id": "implicit-03",
+      "category": "implicit",
+      "message": "Lune de miel à Santorin pour une semaine, 4000€, on aime la gastronomie et les couchers de soleil",
+      "expected": {
+        "destination": "Santorini",
+        "num_days": 7,
+        "total_budget": 4000,
+        "num_travelers": 2,
+        "preferred_categories": ["gastro", "nature"]
+      }
+    },
+    {
+      "id": "implicit-04",
+      "category": "implicit",
+      "message": "Voyage en famille à Disneyland Paris, 3 jours avec 2 enfants, budget 1500€",
+      "expected": {
+        "destination": "Disneyland Paris",
+        "num_days": 3,
+        "total_budget": 1500,
+        "num_travelers": 4
+      }
+    },
+    {
+      "id": "implicit-05",
+      "category": "implicit",
+      "message": "Week-end du 14 juin 2026 à Bruges, 800€ pour 2",
+      "expected": {
+        "destination": "Bruges",
+        "num_days": 2,
+        "total_budget": 800,
+        "num_travelers": 2,
+        "start_date": "2026-06-13",
+        "end_date": "2026-06-14"
+      }
+    },
+    {
+      "id": "tricky-01",
+      "category": "tricky",
+      "message": "Comme tout le monde j'adore les musées (mais bon en vrai, on déteste), on part 4 jours à Berlin avec 1800€",
+      "expected": {
+        "destination": "Berlin",
+        "num_days": 4,
+        "total_budget": 1800,
+        "avoided_categories": ["culture"]
+      }
+    },
+    {
+      "id": "tricky-02",
+      "category": "tricky",
+      "message": "Voyage à Athènes 5 jours pour 2 personnes, on a 2500€, on aimerait éviter de marcher trop, idéalement maximum 3 activités par jour",
+      "expected": {
+        "destination": "Athènes",
+        "num_days": 5,
+        "num_travelers": 2,
+        "total_budget": 2500,
+        "preferred_pace": "relaxed",
+        "max_activities_per_day": 3
+      }
+    },
+    {
+      "id": "tricky-03",
+      "category": "tricky",
+      "message": "Budapest, 3 jours, 1200€ pour deux, on aime les bains thermaux et la cuisine locale, et on veut absolument voir le Parlement, mais pas envie de boîtes de nuit",
+      "expected": {
+        "destination": "Budapest",
+        "num_days": 3,
+        "total_budget": 1200,
+        "num_travelers": 2,
+        "preferred_categories": ["nature", "gastro"],
+        "avoided_categories": ["nightlife"],
+        "must_visit": ["parlement"]
       }
     }
   ]
