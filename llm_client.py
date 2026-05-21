@@ -172,8 +172,11 @@ AUTHORIZED FIELDS:
 - must_avoid (array of activity names/IDs)
 - max_activities_per_day (int)
 - min_activities_per_day (int)
-- day_start_hour (int, 0-23): hour when the user wants to start activities each day (e.g. 9 for 9h)
-- day_end_hour (int, 1-24): hour when the user wants to stop activities each day (e.g. 18 for 18h, 24 for midnight)
+- day_start_hour (int, 0-23): GLOBAL hour when activities start each day (every day)
+- day_end_hour (int, 1-24): GLOBAL hour when activities stop each day (every day)
+- day_specific_start_hour (object {day_num: hour}): override start hour for a SPECIFIC trip day (1-indexed)
+- day_specific_end_hour (object {day_num: hour}): override end hour for a SPECIFIC trip day (1-indexed)
+  CRITICAL: when the user mentions a SPECIFIC day or weekday ("le samedi", "le jour 3", "le dernier jour"), use the day-specific field — NEVER day_end_hour (which applies to ALL days).
 - transport_mode (string): "foot" (walking, default), "bike" (vélo), or "car" (voiture). Detect from words like "à pied", "marche", "vélo", "voiture", "en bus" (→ car).
 - start_date (string ISO YYYY-MM-DD): exact arrival date. Always normalize to ISO format.
 - end_date (string ISO YYYY-MM-DD): exact departure date. Compute it if user gives start_date + num_days (end = start + num_days - 1).
@@ -211,6 +214,18 @@ User: "Je veux commencer à 10h et finir à 18h"
 User: "On commence tôt vers 8h du matin et on arrête à 22h le soir"
 → {"day_start_hour":8,"day_end_hour":22}
 
+User: "j'aimerais finir à midi le samedi" (Plan : ...jour 2=samedi...)
+→ {"day_specific_end_hour":{"2":12}}
+
+User: "le jour 3 on commence à 11h"
+→ {"day_specific_start_hour":{"3":11}}
+
+User: "le dernier jour on finit à 14h" (Plan : 4 jours)
+→ {"day_specific_end_hour":{"4":14}}
+
+User: "le jour 1 et 2 on commence à 10h"
+→ {"day_specific_start_hour":{"1":10,"2":10}}
+
 User: "Hello!"
 → {}
 
@@ -231,6 +246,24 @@ User: "je ne veux plus aller à Notre-Dame"
 
 User: "supprime l'activité du musée d'Orsay"
 → {"must_avoid":["musée d'orsay"]}
+
+RE-AJOUT (« remet », « remets », « rajoute », « ajoute de nouveau ») :
+ALWAYS emit must_visit with the activity name. NEVER emit must_avoid for re-adding.
+
+User: "remet la Tour Eiffel"
+→ {"must_visit":["tour eiffel"]}
+
+User: "remets le Louvre"
+→ {"must_visit":["louvre"]}
+
+User: "rajoute la cathédrale St-Patrick"
+→ {"must_visit":["cathédrale st-patrick"]}
+
+User: "ajoute de nouveau le musée d'Orsay"
+→ {"must_visit":["musée d'orsay"]}
+
+User: "ajoute le Sacré-Cœur le jour 2"
+→ {"must_visit":["sacré-cœur"],"must_visit_on_day":{"sacré-cœur":2}}
 
 User: "Can you add the Eiffel Tower on day 1?"
 → {"must_visit":["eiffel tower"],"must_visit_on_day":{"eiffel tower":1}}
@@ -460,6 +493,7 @@ def narrate_plan(
     constraints: dict,
     extracted_changes: dict,
     previous_count: Optional[int] = None,
+    plan_diff: Optional[dict] = None,
 ) -> str:
     """Génère la réponse conversationnelle à afficher dans le chat. `previous_count` (si fourni) = nombre d'activités du plan précédent,"""
     plan_summary = _summarize_plan(plan, constraints)
@@ -490,11 +524,12 @@ def narrate_plan(
                 f"\n\n=== CHANGEMENT EFFECTIF : AUCUN ===\n"
                 f"Avant : {previous_count} activités. Après : {previous_count} activités. DELTA : 0.\n"
                 f"INTERDICTION ABSOLUE de dire 'j'ai ajouté/intégré/retiré X activités'.\n"
-                f"Tu DOIS dire que le plan reste inchangé à {previous_count} activités\n"
-                f"et expliquer la cause probable (créneaux horaires saturés, contraintes repas,\n"
-                f"durées des activités). Puis suggère UNE piste concrète : "
-                f"étendre l'amplitude horaire (ex: 8h-22h), allonger le séjour, "
-                f"augmenter le budget, ou modifier les catégories préférées."
+                f"Tu DOIS dire que le plan reste inchangé à {previous_count} activités.\n"
+                f"NE PRESUME PAS de la cause (n'invente pas « horaires saturés »,\n"
+                f"« créneaux pleins », « contraintes repas »…). Dis simplement que la\n"
+                f"demande n'a pas pu être appliquée et propose à l'utilisateur de\n"
+                f"reformuler ou de préciser ce qu'il souhaite (jour visé, activité"
+                f" précise, plage horaire à étendre s'il connaît la contrainte qui bloque)."
             )
 
     pool_block = ""
@@ -506,13 +541,43 @@ def narrate_plan(
                 f"déjà incluses ; impossible d'en ajouter sans changer la durée ou les contraintes."
             )
 
+    diff_block = ""
+    if plan_diff:
+        moved = plan_diff.get("moved", [])
+        added = plan_diff.get("added", [])
+        removed = plan_diff.get("removed", [])
+        if moved or added or removed:
+            lines = ["\n\n=== DIFF DETAILLE (par rapport au tour precedent) ==="]
+            if added:
+                lines.append("Ajoutees :")
+                for x in added:
+                    lines.append(f"  + '{x['name']}' (jour {x['day']})")
+            if removed:
+                lines.append("Retirees :")
+                for x in removed:
+                    lines.append(f"  - '{x['name']}' (etait jour {x['day']})")
+            if moved:
+                lines.append("Deplacees :")
+                for x in moved:
+                    lines.append(f"  ~ '{x['name']}' : jour {x['from_day']} -> jour {x['to_day']}")
+            if moved and added:
+                lines.append(
+                    "\nIMPORTANT : il y a a la fois des ajouts ET des deplacements. "
+                    "Tu DOIS justifier les deplacements : ce sont des compromis que le "
+                    "solveur a faits pour caser les ajouts dans les fenetres horaires "
+                    "et les contraintes de capacite. Exemple : 'pour caser X au jour 2, "
+                    "j'ai du deplacer Y du jour 2 au jour 3 ou il y avait de la place'."
+                )
+            diff_block = "\n".join(lines)
+
     user_content = (
         f"Message utilisateur : \"{user_message}\"\n"
         f"Contraintes modifiées par ce message : {changes_str}\n"
         f"Résumé du plan : {plan_summary}"
         f"{delta_block}"
+        f"{diff_block}"
         f"{pool_block}\n\n"
-        "Réponds en 2-3 phrases max."
+        "Réponds en 2-3 phrases max (4-5 si tu dois justifier des déplacements)."
     )
 
     resp = chat_with_fallback(

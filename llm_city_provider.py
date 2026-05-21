@@ -317,6 +317,99 @@ def _compute_travel_matrix(
         return None
     return matrix
 
+_SINGLE_ACT_PROMPT = """\
+You are a travel data expert. The user wants to ADD a specific activity to their
+trip in {city_name} that wasn't in the initial pool. Generate ONE activity entry
+in the same JSON schema as the city pool.
+
+Activity name (verbatim as user wrote it) : "{act_name}"
+
+Return ONLY this JSON (no markdown):
+{{"id":"<ascii_slug>","name":"<canonical French name>","category":"<culture|gastro|nature|shopping|nightlife>","duration_hours":<float>,"cost_euros":<int>,"opening_hour":<int>,"closing_hour":<int>,"latitude":<lat>,"longitude":<lon>,"priority_score":<1-10>,"confidence":<0-1>,"address":"<full address>"}}
+
+REALISTIC durations (museum 1.5-3h, monument 0.5-2h, park 1-2h, restaurant 1.5-2.5h, day trip 4-6h).
+REALISTIC hours (museum 9-18, park 6-22, restaurant 12-14/19-23, bar 18-24).
+GPS 4+ decimals. If the place doesn't seem to exist in {city_name}, still produce
+the best plausible activity matching the name.
+"""
+
+def generate_single_activity(act_name: str, city_name: str) -> Optional[dict]:
+    """Genere une activite specifique demandee par l'utilisateur via le LLM."""
+    try:
+        resp = chat_with_fallback(
+            timeout=60.0,
+            messages=[{"role": "user",
+                       "content": _SINGLE_ACT_PROMPT.format(
+                           city_name=city_name, act_name=act_name)}],
+            temperature=0.2,
+            max_tokens=600,
+            response_format={"type": "json_object"},
+            extra_body=QWEN_NO_THINK,
+        )
+        raw = resp.choices[0].message.content or ""
+        data = parse_json_salvage(_extract_json_blob(raw))
+        act = LLMActivity(**data)
+        return {
+            "id": act.id,
+            "name": act.name,
+            "category": act.clean_category(),
+            "duration_hours": act.duration_hours,
+            "cost_euros": act.cost_euros,
+            "opening_hour": act.opening_hour,
+            "closing_hour": act.closing_hour,
+            "latitude": act.latitude,
+            "longitude": act.longitude,
+            "priority_score": act.priority_score,
+            "zone": "",
+            "confidence": act.confidence,
+            "address": act.address or "",
+            "nearest_stop": "",
+            "transit_options": [],
+            "transit_exit": "",
+            "data_source_detail": "llm-on-demand",
+        }
+    except Exception as e:
+        logger.warning("[LLMCity] generate_single_activity('%s') KO: %s", act_name, e)
+        return None
+
+def extend_city_data_with_activities(
+    city_data: dict, names: list[str], transport_mode: str = "foot",
+) -> tuple[dict, list[str]]:
+    """Ajoute les activites demandees au pool, recompute la matrice OSRM.
+    Renvoie (city_data_etendu, liste_des_ajoutees)."""
+    if not names:
+        return city_data, []
+    city_name = (city_data.get("city") or {}).get("name") or ""
+    added: list[dict] = []
+    for n in names:
+        act = generate_single_activity(n, city_name)
+        if act:
+            existing_ids = {a["id"] for a in city_data["activities"]}
+            base_id = act["id"]
+            i = 1
+            while act["id"] in existing_ids:
+                act["id"] = f"{base_id}_{i}"
+                i += 1
+            added.append(act)
+
+    if not added:
+        return city_data, []
+
+    new_activities = city_data["activities"] + added
+    new_matrix = _compute_travel_matrix(new_activities, transport_mode)
+    if not new_matrix:
+        logger.warning("[LLMCity] extension OSRM KO — on garde le pool initial")
+        return city_data, []
+
+    city_lat = city_data["city"]["latitude"]
+    city_lon = city_data["city"]["longitude"]
+    _assign_zones(added, city_lat, city_lon)
+
+    extended = dict(city_data)
+    extended["activities"] = new_activities
+    extended["travel_matrix"] = new_matrix
+    return extended, [a["name"] for a in added]
+
 def generate_city_data(
     city_name: str,
     transport_mode: str = "foot",

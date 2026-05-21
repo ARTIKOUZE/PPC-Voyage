@@ -52,6 +52,9 @@ class TravelConstraints:
 
     day_start_hour: Optional[int] = None
     day_end_hour: Optional[int] = None
+    # Overrides par jour (1-indexed) : {2: 12} = jour 2 finit à 12h.
+    day_specific_start_hour: dict[int, int] = field(default_factory=dict)
+    day_specific_end_hour: dict[int, int] = field(default_factory=dict)
 
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -81,7 +84,7 @@ def dict_to_activity(d: dict) -> Activity:
     )
 
 def haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Distance en mètres entre deux points GPS. Utilisée uniquement pour l'affichage (jamais comme fallback du temps de trajet OSRM)."""
+    """Distance en mètres entre deux points GPS. Utilisée uniquement pour l'affichage."""
     R = 6_371_000.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)

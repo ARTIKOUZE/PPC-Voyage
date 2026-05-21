@@ -130,28 +130,35 @@ class TravelPlannerSolver:
             )
             self.model.add(daily_gastro <= C.daily_food_budget * C.num_travelers)
 
-    def _day_window_slots(self) -> tuple[int, int]:
-        """Fenêtre journalière en slots. Début tolérant (−30 min), fin stricte."""
+    def _day_window_slots(self, day_idx: int = 0) -> tuple[int, int]:
+        """Fenêtre journalière en slots pour un jour donné (0-indexed).
+        Les overrides par jour (day_specific_*_hour, 1-indexed) prennent le pas."""
         C = self.constraints
         START_MARGIN = 1
-        if C.day_start_hour is not None:
-            raw_start = max(self.DAY_START, C.day_start_hour)
+        day_1 = day_idx + 1
+        start_h = C.day_specific_start_hour.get(day_1, C.day_start_hour) \
+            if isinstance(C.day_specific_start_hour, dict) else C.day_start_hour
+        end_h = C.day_specific_end_hour.get(day_1, C.day_end_hour) \
+            if isinstance(C.day_specific_end_hour, dict) else C.day_end_hour
+
+        if start_h is not None:
+            raw_start = max(self.DAY_START, start_h)
             win_start = max(0, (raw_start - self.DAY_START) * 2 - START_MARGIN)
         else:
             win_start = 0
-        if C.day_end_hour is not None:
-            raw_end = min(self.DAY_END, C.day_end_hour)
+        if end_h is not None:
+            raw_end = min(self.DAY_END, end_h)
             win_end = min(self.SLOTS_PER_DAY, (raw_end - self.DAY_START) * 2)
         else:
             win_end = self.SLOTS_PER_DAY
         return win_start, win_end
 
     def _add_temporal_constraints(self):
-        win_start, win_end = self._day_window_slots()
         for a_id, act in self.activities.items():
             for d in range(self.constraints.num_days):
                 if (a_id, d) not in self.assign:
                     continue
+                win_start, win_end = self._day_window_slots(d)
                 dur_slots = int(act.duration_hours * 2)
                 open_slot = max(0, (act.opening_hour - self.DAY_START) * 2)
                 close_slot = min(self.SLOTS_PER_DAY,
@@ -236,10 +243,19 @@ class TravelPlannerSolver:
             a_id = self._resolve_activity(name_or_id)
             if a_id:
                 self.model.add(self.selected[a_id] == 1)
+            else:
+                logger.warning(
+                    "[Solver] must_visit '%s' n'a matche aucune activite du pool — "
+                    "elle ne sera pas ajoutee.", name_or_id,
+                )
 
         for name_or_id, day_1 in C.must_visit_on_day.items():
             a_id = self._resolve_activity(name_or_id)
             if not a_id:
+                logger.warning(
+                    "[Solver] must_visit_on_day '%s' (jour %s) n'a matche aucune "
+                    "activite — l'ajout au jour cible va echouer.", name_or_id, day_1,
+                )
                 continue
             day = day_1 - 1
             if 0 <= day < C.num_days and (a_id, day) in self.assign:
@@ -403,35 +419,37 @@ class TravelPlannerSolver:
     def _add_cardinality_constraints(self):
         C = self.constraints
 
-        win_start, win_end = self._day_window_slots()
-        available_hours = (win_end - win_start) / 2
-
         min_act_duration = min(
             (act.duration_hours for act in self.activities.values()),
             default=1.0
         )
         min_act_duration = max(0.5, min_act_duration)
 
-        dynamic_max = min(C.max_activities_per_day, int(available_hours / min_act_duration))
-        dynamic_max = max(1, dynamic_max)
-
         HARD_FLOOR = 1
         soft_target = max(HARD_FLOOR, int(C.min_activities_per_day))
 
         for d in range(C.num_days):
+            win_start, win_end = self._day_window_slots(d)
+            available_hours = (win_end - win_start) / 2
+            day_max = min(C.max_activities_per_day, int(available_hours / min_act_duration))
+            day_max = max(1, day_max)
+
             day_count = sum(
                 self.assign[a_id, d]
                 for a_id in self.activities
                 if (a_id, d) in self.assign
             )
-            self.model.add(day_count <= dynamic_max)
-            self.model.add(day_count >= HARD_FLOOR)
+            self.model.add(day_count <= day_max)
+            # Floor : si la fenêtre du jour est < 1h, on relâche à 0 pour éviter INFEASIBLE.
+            day_floor = HARD_FLOOR if available_hours >= 1 else 0
+            self.model.add(day_count >= day_floor)
 
-            if soft_target > HARD_FLOOR:
+            day_soft_target = min(soft_target, day_max)
+            if day_soft_target > day_floor:
                 min_shortfall = self.model.new_int_var(
-                    0, soft_target, f"min_short_d{d}"
+                    0, day_soft_target, f"min_short_d{d}"
                 )
-                self.model.add(min_shortfall >= soft_target - day_count)
+                self.model.add(min_shortfall >= day_soft_target - day_count)
                 self.model.add(min_shortfall >= 0)
                 self.soft_penalties.append(min_shortfall * 20)
 
@@ -586,8 +604,9 @@ class TravelPlannerSolver:
         C = self.constraints
         plan = {"days": [], "status": "OPTIMAL" if status == cp_model.OPTIMAL else "FEASIBLE"}
 
-        total_cost = C.hotel_per_night * C.num_days
-        total_cost += C.daily_food_budget * C.num_days * C.num_travelers
+        hotel_cost = C.hotel_per_night * C.num_days
+        food_cost_actual = 0
+        activity_cost_actual = 0
 
         for d in range(C.num_days):
             day_activities = []
@@ -599,6 +618,7 @@ class TravelPlannerSolver:
                     start_hour = self.DAY_START + start_slot * 0.5
                     end_hour = start_hour + act.duration_hours
 
+                    line_cost = act.cost_euros * C.num_travelers
                     day_activities.append({
                         "id": a_id,
                         "name": act.name,
@@ -608,9 +628,12 @@ class TravelPlannerSolver:
                         "end_time": f"{int(end_hour):02d}:{int((end_hour % 1) * 60):02d}",
                         "start_slot": int(start_slot),
                         "duration_hours": act.duration_hours,
-                        "cost": act.cost_euros * C.num_travelers,
+                        "cost": line_cost,
                     })
-                    total_cost += act.cost_euros * C.num_travelers
+                    if act.category == "gastro":
+                        food_cost_actual += line_cost
+                    else:
+                        activity_cost_actual += line_cost
 
             day_activities.sort(key=lambda x: x["start_time"])
 
@@ -658,9 +681,7 @@ class TravelPlannerSolver:
                 "total_travel_minutes": sum(t["minutes"] for t in transitions),
             })
 
-        hotel_cost = C.hotel_per_night * C.num_days
-        food_cost = C.daily_food_budget * C.num_days * C.num_travelers
-        activity_cost = total_cost - hotel_cost - food_cost
+        total_cost = hotel_cost + food_cost_actual + activity_cost_actual
         remaining = C.total_budget - total_cost
 
         plan["summary"] = {
@@ -669,8 +690,8 @@ class TravelPlannerSolver:
             "remaining_budget": remaining,
             "total_activities": sum(len(day["activities"]) for day in plan["days"]),
             "hotel_cost": hotel_cost,
-            "food_cost": food_cost,
-            "activity_cost": activity_cost,
+            "food_cost": food_cost_actual,
+            "activity_cost": activity_cost_actual,
             "objective_value": solver.objective_value,
         }
 
@@ -816,6 +837,20 @@ def solve_with_city_data(
         k: v for k, v in constraints_dict.items()
         if k in TravelConstraints.__dataclass_fields__
     })
+
+    def _coerce_int_keys(d):
+        if not isinstance(d, dict):
+            return {}
+        out = {}
+        for k, v in d.items():
+            try:
+                out[int(k)] = v
+            except (TypeError, ValueError):
+                continue
+        return out
+    constraints.day_specific_start_hour = _coerce_int_keys(constraints.day_specific_start_hour)
+    constraints.day_specific_end_hour = _coerce_int_keys(constraints.day_specific_end_hour)
+
     _derive_trip_weekdays(constraints)
 
     activities = [dict_to_activity(a) for a in city_data.get("activities", [])]

@@ -29,6 +29,8 @@ DEFAULT_CONSTRAINTS = {
     "must_visit": [],
     "must_avoid": [],
     "must_visit_on_day": {},
+    "day_specific_start_hour": {},
+    "day_specific_end_hour": {},
     "max_activities_per_day": 6,
     "min_activities_per_day": 2,
     "transport_mode": None,
@@ -177,6 +179,8 @@ DICT_FIELDS = {
     "must_visit_on_day",
     "min_per_category",
     "max_per_category",
+    "day_specific_start_hour",
+    "day_specific_end_hour",
 }
 
 INCOMPATIBLE_PAIRS = [
@@ -281,11 +285,21 @@ def merge_constraints(current: dict, update: dict) -> dict:
         else:
             merged[key] = value
 
+    def _norm_for_diff(s):
+        if not isinstance(s, str):
+            return s
+        import re as _re, unicodedata as _ud
+        x = s.lower().strip().replace("œ", "oe").replace("æ", "ae")
+        x = "".join(c for c in _ud.normalize("NFD", x) if _ud.category(c) != "Mn")
+        return _re.sub(r"\s+", " ", _re.sub(r"[^\w\s]", " ", x)).strip()
+
     for a, b in INCOMPATIBLE_PAIRS:
         if a in update and b in merged:
-            merged[b] = [x for x in merged[b] if x not in update[a]]
+            forbidden = {_norm_for_diff(x) for x in update[a]}
+            merged[b] = [x for x in merged[b] if _norm_for_diff(x) not in forbidden]
         if b in update and a in merged:
-            merged[a] = [x for x in merged[a] if x not in update[b]]
+            forbidden = {_norm_for_diff(x) for x in update[b]}
+            merged[a] = [x for x in merged[a] if _norm_for_diff(x) not in forbidden]
 
     return merged
 
@@ -311,6 +325,89 @@ def _resolve_hotel_budget(constraints: dict) -> dict:
         out["hotel_per_night"] = budget_per_night
         return out
     return constraints
+
+def _unknown_must_visit_names(extracted: dict, city_data: dict) -> list[str]:
+    """Renvoie les noms must_visit / must_visit_on_day qui ne matchent
+    aucune activite du pool (apres normalisation tokens + fuzzy).
+    """
+    import re as _re
+    import unicodedata as _ud
+    from difflib import SequenceMatcher
+
+    def _norm(s):
+        s = (s or "").lower().strip().replace("œ", "oe").replace("æ", "ae")
+        s = "".join(c for c in _ud.normalize("NFD", s) if _ud.category(c) != "Mn")
+        return _re.sub(r"\s+", " ", _re.sub(r"[^\w\s]", " ", s)).strip()
+
+    pool_names = [a.get("name", "") for a in (city_data or {}).get("activities", [])]
+    pool_ids = {a.get("id", "") for a in (city_data or {}).get("activities", [])}
+    pool_norms = [_norm(n) for n in pool_names]
+
+    def _matches_pool(query: str) -> bool:
+        if query in pool_ids:
+            return True
+        q = _norm(query)
+        if not q:
+            return True
+        if any(q == p for p in pool_norms):
+            return True
+        # contenance ou tokens
+        q_tokens = set(q.split())
+        for p in pool_norms:
+            if q in p or p in q:
+                return True
+            p_tokens = set(p.split())
+            if q_tokens and q_tokens.issubset(p_tokens):
+                return True
+        # fuzzy
+        return any(SequenceMatcher(None, q, p).ratio() >= 0.75 for p in pool_norms)
+
+    candidates: list[str] = []
+    for name in (extracted.get("must_visit") or []):
+        if isinstance(name, str) and not _matches_pool(name):
+            candidates.append(name)
+    for name in (extracted.get("must_visit_on_day") or {}).keys():
+        if isinstance(name, str) and not _matches_pool(name) and name not in candidates:
+            candidates.append(name)
+    return candidates
+
+def _compute_plan_diff(previous_plan: dict, new_plan: dict, city_data: dict) -> dict:
+    """Diff entre l'ancien et le nouveau plan : activités déplacées, ajoutées, retirées.
+    Sert à fournir au LLM le contexte exact des compromis pour qu'il les justifie."""
+    acts_by_id = {a["id"]: a for a in (city_data or {}).get("activities", [])}
+
+    def _name(aid: str) -> str:
+        return (acts_by_id.get(aid) or {}).get("name", aid)
+
+    # ancien jour de chaque activité
+    prev_day_of: dict[str, int] = {}
+    for d_idx, entries in previous_plan.items():
+        for entry in entries:
+            aid = entry[0] if isinstance(entry, (list, tuple)) else entry
+            prev_day_of[aid] = d_idx
+
+    # nouveau jour de chaque activité
+    new_day_of: dict[str, int] = {}
+    for d in new_plan.get("days", []):
+        d_idx = d["day"] - 1
+        for a in d.get("activities", []):
+            new_day_of[a["id"]] = d_idx
+
+    moved: list[dict] = []
+    added: list[dict] = []
+    removed: list[dict] = []
+    for aid, d_new in new_day_of.items():
+        if aid not in prev_day_of:
+            added.append({"name": _name(aid), "day": d_new + 1})
+        elif prev_day_of[aid] != d_new:
+            moved.append({"name": _name(aid),
+                          "from_day": prev_day_of[aid] + 1,
+                          "to_day": d_new + 1})
+    for aid, d_old in prev_day_of.items():
+        if aid not in new_day_of:
+            removed.append({"name": _name(aid), "day": d_old + 1})
+
+    return {"moved": moved, "added": added, "removed": removed}
 
 def _build_plan_summary(session_id: str, current: dict) -> Optional[str]:
     """Construit une description compacte du plan actuel pour aider le LLM à
@@ -347,6 +444,23 @@ def _build_plan_summary(session_id: str, current: dict) -> Optional[str]:
     summary = f"{total} activités sur {num_days} jours (~{avg:.1f}/jour)"
     if cat_str:
         summary += f", dont {cat_str}"
+
+    # Mapping jour-de-séjour ↔ date ↔ jour-de-semaine pour interpréter
+    # « le samedi », « le dernier jour », etc.
+    start_date = current.get("start_date")
+    if start_date:
+        try:
+            from datetime import date, timedelta
+            y, m, dd = map(int, start_date.split("-"))
+            d0 = date(y, m, dd)
+            jours_fr = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+            mapping = []
+            for i in range(num_days):
+                d_i = d0 + timedelta(days=i)
+                mapping.append(f"jour {i+1}={jours_fr[d_i.weekday()]} {d_i.strftime('%d/%m')}")
+            summary += ". Calendrier : " + " ; ".join(mapping)
+        except (ValueError, TypeError):
+            pass
 
     # Liste explicite des noms : le LLM doit les ré-utiliser tels quels dans must_avoid/must_visit
     if city_data:
@@ -456,6 +570,19 @@ def handle_turn(
         if city_data:
             _store.set_city_data(session_id, destination, effective_transport, city_data)
 
+    if city_data:
+        unknown = _unknown_must_visit_names(extracted, city_data)
+        if unknown:
+            from llm_city_provider import extend_city_data_with_activities
+            logger.info("[Orch] %d activite(s) absente(s) du pool, extension via LLM : %s",
+                        len(unknown), unknown)
+            city_data, added_names = extend_city_data_with_activities(
+                city_data, unknown, transport_mode=effective_transport,
+            )
+            if added_names:
+                _store.set_city_data(session_id, destination, effective_transport, city_data)
+                errors.append(f"pool_extended: {added_names}")
+
     if not city_data:
         errors.append(f"city_not_found: {destination}")
         reply = (
@@ -514,10 +641,12 @@ def handle_turn(
     explanation = explain_solution(plan, merged)
 
     previous_count = None
-    if previous_plan:
+    plan_diff = None
+    if previous_plan and plan and plan.get("status") in ("OPTIMAL", "FEASIBLE"):
         previous_count = sum(len(v) for v in previous_plan.values())
+        plan_diff = _compute_plan_diff(previous_plan, plan, city_data)
     reply = narrate_plan(user_message, plan, merged, extracted,
-                          previous_count=previous_count)
+                          previous_count=previous_count, plan_diff=plan_diff)
 
     return {
         "reply": reply,
